@@ -12,6 +12,13 @@ SKIP_FIRST_MINUTES = 15  # avoid opening volatility (trade from 9:30)
 SCAN_INTERVAL_MINUTES = 5
 TIMEZONE = "Asia/Kolkata"
 
+# ── Auto-start ───────────────────────────────────────────────────────────────
+# When True the bot scheduler starts automatically on app launch (no UI click needed).
+# Ideal for cloud deployments (Railway, Render) where you want hands-free trading.
+# Set to False if you want manual control via the UI.
+import os
+AUTO_START_BOT = os.environ.get("AUTO_START_BOT", "true").lower() == "true"
+
 # ── Risk Management ─────────────────────────────────────────────────────────
 MAX_POSITIONS = 7
 MAX_POSITION_PCT = 0.20       # max 20% of portfolio per stock

@@ -55,6 +55,11 @@ portfolio = Portfolio.load()
 scheduler_instance = None
 IST = pytz.timezone(config.TIMEZONE)
 
+# ── Auto-start bot on launch (cloud-friendly) ──────────────────────────────
+if config.AUTO_START_BOT:
+    scheduler_instance = start_scheduler(portfolio)
+    logger.info("AUTO_START_BOT=true — scheduler started automatically")
+
 
 # ── Pages ─────────────────────────────────────────────────────────────────
 
