@@ -732,9 +732,26 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
         <span id="bt-run-icon">▶</span>
         <span id="bt-run-label">Run Backtest</span>
       </button>
+      <label class="flex items-center gap-2 text-xs" style="color:var(--muted)">
+        <input type="checkbox" id="bt-stream" checked class="rounded">
+        Stream live output
+      </label>
       <div id="bt-status" class="text-xs" style="color:var(--muted)"></div>
     </div>
-    <div class="text-[10px] mt-2" style="color:var(--muted)">Uses Yahoo Finance 5-min data. AI calls count toward API cost. Max ~60 days.</div>
+    <div class="text-[10px] mt-2" style="color:var(--muted)">Uses Groww 5-min data. AI calls count toward API cost. Rate-limited (~1 req/s). Uncheck "Stream" if live feed doesn't work.</div>
+  </div>
+
+  <div id="bt-live-feed" class="hidden card mb-6 overflow-hidden">
+    <div class="px-5 py-3 border-b flex items-center justify-between" style="border-color:var(--border);background:rgba(0,0,0,.2)">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full pulse" style="background:var(--primary)"></span>
+        <span class="text-sm font-medium text-white">Live Backtest Feed</span>
+      </div>
+      <span class="text-[10px] mono" style="color:var(--muted)">scans · analysis · trades</span>
+    </div>
+    <div class="p-4 max-h-64 overflow-y-auto" style="background:rgba(0,5,15,.6)">
+      <pre id="bt-feed-content" class="mono text-xs leading-relaxed whitespace-pre-wrap break-words" style="color:rgba(221,230,240,.9)"></pre>
+    </div>
   </div>
 
   <div id="bt-results" class="hidden">
@@ -1159,30 +1176,56 @@ function runBacktest() {
   const start = el('bt-start')?.value, end = el('bt-end')?.value;
   if (!start || !end) { showToast('Select start and end dates','warning'); return; }
   const btn = el('bt-run-btn'), icon = el('bt-run-icon'), lbl = el('bt-run-label'), status = el('bt-status');
-  btn.disabled = true; icon.textContent = '⟳'; lbl.textContent = 'Running…'; status.textContent = 'Fetching data & running strategy…';
+  btn.disabled = true; icon.textContent = '⟳'; lbl.textContent = 'Running…'; status.textContent = 'Starting backtest…';
   status.style.color = 'var(--primary)';
 
-  fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_date:start,end_date:end}) })
+  const stream = el('bt-stream')?.checked !== false;
+  if (stream) {
+    el('bt-live-feed')?.classList.remove('hidden');
+    el('bt-feed-content').textContent = '';
+  }
+
+  fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_date:start,end_date:end,stream:stream}) })
     .then(r => r.json().then(d => ({ ok:r.ok, data:d })))
     .then(({ok, data}) => {
-      btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
       if (!ok) {
+        btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
         status.textContent = data.error || 'Backtest failed';
         status.style.color = 'var(--red)';
         showToast(data.error || 'Backtest failed','error');
+        el('bt-live-feed')?.classList.add('hidden');
         return;
       }
-      status.textContent = 'Done';
-      status.style.color = 'var(--green)';
-      showToast('Backtest complete','success');
-      renderBacktestResults(data);
+      if (data.status === 'started') {
+        status.textContent = 'Streaming live — watch the feed below';
+        showToast('Backtest started — streaming output','info');
+      } else if (data.trades !== undefined || data.summary !== undefined) {
+        btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
+        status.textContent = 'Done';
+        status.style.color = 'var(--green)';
+        showToast('Backtest complete','success');
+        renderBacktestResults(data);
+        el('bt-live-feed')?.classList.add('hidden');
+      } else {
+        btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
+        status.textContent = 'Done';
+      }
     })
     .catch(err => {
       btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
       status.textContent = err.message || 'Request failed';
       status.style.color = 'var(--red)';
       showToast(err.message || 'Backtest failed','error');
+      el('bt-live-feed')?.classList.add('hidden');
     });
+}
+
+function appendBacktestFeed(msg) {
+  const pre = el('bt-feed-content');
+  if (!pre) return;
+  const add = (pre.textContent ? '\n' : '') + msg;
+  pre.textContent += add;
+  pre.scrollTop = pre.scrollHeight;
 }
 
 function renderBacktestResults(d) {
@@ -1595,6 +1638,34 @@ socket.on('ai_eval_fired', data => {
   addFeedItem({type:'ai',msg:'AI evaluated — next in 1h',time:new Date().toISOString()});
   if (data&&data.next_eval) startAiCountdown(data.next_eval);
   showToast('🤖 AI evaluation complete','info');
+});
+
+socket.on('backtest_started', () => {
+  el('bt-feed-content').textContent = '';
+  appendBacktestFeed('Backtest started — loading data & running strategy…');
+});
+socket.on('backtest_event', data => {
+  if (data && data.msg) appendBacktestFeed(data.msg);
+});
+socket.on('backtest_complete', data => {
+  const btn = el('bt-run-btn'), icon = el('bt-run-icon'), lbl = el('bt-run-label'), status = el('bt-status');
+  if (btn) btn.disabled = false;
+  if (icon) icon.textContent = '▶';
+  if (lbl) lbl.textContent = 'Run Backtest';
+  if (!data) data = {};
+  if (data.error) {
+    if (status) status.textContent = data.error;
+    if (status) status.style.color = 'var(--red)';
+    showToast(data.error, 'error');
+    appendBacktestFeed('\n❌ Error: ' + data.error);
+  } else {
+    if (status) status.textContent = 'Done';
+    if (status) status.style.color = 'var(--green)';
+    showToast('Backtest complete', 'success');
+    appendBacktestFeed('\n✓ Backtest complete');
+    renderBacktestResults(data);
+  }
+  el('bt-live-feed')?.classList.remove('hidden');
 });
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────

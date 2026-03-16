@@ -245,8 +245,16 @@ def _nearest_window(scan_time, window_set):
     return None
 
 
-def run_backtest(start_date: date, end_date: date, silent: bool = True) -> dict:
-    """Run backtest for the given date range. Returns dict with trades, summary, equity_curve."""
+def run_backtest(
+    start_date: date,
+    end_date: date,
+    silent: bool = True,
+    emit_fn=None,
+) -> dict:
+    """Run backtest for the given date range. Returns dict with trades, summary, equity_curve.
+
+    When emit_fn(msg) is provided, each print/line is streamed to it in real time.
+    """
     global BACKTEST_DATES, LAST_DATE, cash, positions, trade_history, total_fees, day_summaries
     global _ai_buy_done, _ai_eval_done, _silent
 
@@ -268,13 +276,38 @@ def run_backtest(start_date: date, end_date: date, silent: bool = True) -> dict:
     day_summaries.clear()
     _ai_buy_done.clear()
     _ai_eval_done.clear()
-    _silent = silent
+    _silent = silent and not emit_fn
+
+    import sys
+    if emit_fn:
+        class _EmitWriter:
+            def __init__(self, fn):
+                self.fn = fn
+                self.buf = ""
+            def write(self, s):
+                self.buf += s
+                while "\n" in self.buf or "\r" in self.buf:
+                    i = min(
+                        self.buf.find("\n") if "\n" in self.buf else 999,
+                        self.buf.find("\r") if "\r" in self.buf else 999,
+                    )
+                    line = self.buf[:i].strip()
+                    self.buf = self.buf[i + 1:].lstrip("\r\n")
+                    if line:
+                        self.fn(line)
+            def flush(self):
+                pass
+        _old_stdout = sys.stdout
+        sys.stdout = _EmitWriter(emit_fn)
+        try:
+            result = _execute_backtest()
+        finally:
+            sys.stdout = _old_stdout
+        return result
 
     import io, contextlib
-    out = io.StringIO() if silent else None
-    with (contextlib.redirect_stdout(out) if silent else contextlib.nullcontext()):
-        result = _execute_backtest()
-    return result
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _execute_backtest()
 
 
 def _execute_backtest() -> dict:
@@ -299,8 +332,10 @@ def _execute_backtest() -> dict:
     print(f"Loading {len(config.STOCK_SYMBOLS)} stocks...", end="", flush=True)
 
     stock_data = {}
+    week_start = BACKTEST_DATES[0]
+    week_end   = BACKTEST_DATES[-1]
     for sym in config.STOCK_SYMBOLS:
-        df = data_fetcher.fetch_intraday(sym)
+        df = data_fetcher.fetch_intraday(sym, start_date=week_start, end_date=week_end)
         if df is None or df.empty:
             continue
         df_ist = df.copy()
@@ -308,8 +343,6 @@ def _execute_backtest() -> dict:
             df_ist.index = df_ist.index.tz_localize("UTC").tz_convert(IST)
         else:
             df_ist.index = df_ist.index.tz_convert(IST)
-        week_start = BACKTEST_DATES[0]
-        week_end   = BACKTEST_DATES[-1]
         df_week = df_ist[
             (df_ist.index.date >= week_start) &
             (df_ist.index.date <= week_end)

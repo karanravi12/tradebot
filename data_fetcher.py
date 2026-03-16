@@ -1,9 +1,8 @@
-"""Market data fetcher — Yahoo Finance primary for backtest, Groww for live.
+"""Market data fetcher — Groww primary for both live and backtest.
 
 Live bot (fetch_data):   Groww only — real-time IST candles.
-Backtest (fetch_intraday): Yahoo Finance first (up to 60 days of 5-min history
-                           for NSE stocks); falls back to Groww (~6 days) if
-                           Yahoo has no data for the symbol.
+Backtest (fetch_intraday): Groww only — uses fetch_historical_candles for the
+                           requested date range. Yahoo was removed per user preference.
 """
 
 import logging
@@ -42,84 +41,31 @@ def _groww():
         raise RuntimeError("groww_live.py module not found.")
 
 
-def _yfinance_intraday(symbol: str) -> pd.DataFrame | None:
-    """Fetch up to 60 days of 5-min candles from Yahoo Finance (.NS suffix).
+def fetch_intraday(
+    symbol: str,
+    start_date=None,
+    end_date=None,
+) -> pd.DataFrame | None:
+    """Fetch multi-day 5-min candles for backtest. Uses Groww only.
 
-    Returns UTC-indexed OHLCV DataFrame, or None on failure.
-    Only used as a backtest fallback — never called by the live bot.
-    """
-    try:
-        import yfinance as yf
+    Args:
+        symbol:     NSE trading symbol
+        start_date: optional date — when provided with end_date, fetches that range from Groww
+        end_date:   optional date — required if start_date is provided
 
-        # Some tickers need special mapping for Yahoo Finance
-        _YF_OVERRIDES = {
-            "M&M":        "M&M.NS",
-            "M&MFIN":     "M&MFIN.NS",
-            "BAJAJ-AUTO": "BAJAJ-AUTO.NS",
-            "MCDOWELL-N": "MCDOWELL-N.NS",
-        }
-        yf_ticker = _YF_OVERRIDES.get(symbol, f"{symbol}.NS")
-
-        df = yf.download(
-            yf_ticker,
-            period="60d",
-            interval="5m",
-            auto_adjust=True,
-            progress=False,
-        )
-        if df is None or df.empty:
-            return None
-
-        # yfinance returns (Price, Ticker) MultiIndex — drop the ticker level
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-
-        df = df.rename(columns={
-            "Open": "Open", "High": "High", "Low": "Low",
-            "Close": "Close", "Volume": "Volume",
-        })
-        df = _validate(df, symbol, min_rows=10)
-        if df is None:
-            return None
-
-        # Ensure UTC index
-        if df.index.tzinfo is None:
-            df.index = df.index.tz_localize("UTC")
-        else:
-            df.index = df.index.tz_convert("UTC")
-
-        # Keep only NSE market hours (9:15–15:30 IST = 3:45–10:00 UTC)
-        ist_idx = df.index.tz_convert("Asia/Kolkata")
-        mask = (
-            (ist_idx.hour > 9) | ((ist_idx.hour == 9) & (ist_idx.minute >= 15))
-        ) & (
-            (ist_idx.hour < 15) | ((ist_idx.hour == 15) & (ist_idx.minute <= 30))
-        )
-        df = df[mask]
-
-        logger.debug(f"[{symbol}] Yahoo Finance: {len(df)} candles")
-        return df if len(df) >= 10 else None
-    except Exception as e:
-        logger.debug(f"[{symbol}] Yahoo Finance error: {e}")
-        return None
-
-
-def fetch_intraday(symbol: str) -> pd.DataFrame | None:
-    """Fetch multi-day 5-min candles for backtest.
-
-    Tries Yahoo Finance first (up to 60 days of 5-min history for NSE stocks).
-    Falls back to Groww (recent ~6 days) if Yahoo has no data for the symbol.
     Returns UTC-indexed DataFrame.
     """
-    # ── 1. Try Yahoo Finance (60-day history) ────────────────────────────
-    df = _yfinance_intraday(symbol)
-    if df is not None:
-        return df
-
-    # ── 2. Fall back to Groww (recent ~6 days) ───────────────────────────
     try:
         g = _groww()
-        df = g.fetch_multi_day_candles(symbol, days=6, interval_minutes=5)
+        if start_date is not None and end_date is not None:
+            from datetime import datetime as dt
+            from zoneinfo import ZoneInfo
+            ist = ZoneInfo("Asia/Kolkata")
+            from_dt = dt(start_date.year, start_date.month, start_date.day, 9, 15, 0)
+            to_dt   = dt(end_date.year, end_date.month, end_date.day, 15, 30, 0)
+            df = g.fetch_historical_candles(symbol, from_dt, to_dt, interval_minutes=5)
+        else:
+            df = g.fetch_multi_day_candles(symbol, days=6, interval_minutes=5)
         df = _validate(df, symbol, min_rows=10)
         if df is not None:
             if df.index.tzinfo is not None:
@@ -128,10 +74,9 @@ def fetch_intraday(symbol: str) -> pd.DataFrame | None:
                 df.index = df.index.tz_localize("Asia/Kolkata").tz_convert("UTC")
             logger.debug(f"[{symbol}] Groww: {len(df)} candles")
             return df
-    except Exception:
-        pass
-
-    logger.warning(f"[{symbol}] No data from Yahoo Finance or Groww")
+    except Exception as e:
+        logger.debug(f"[{symbol}] Groww fetch error: {e}")
+    logger.warning(f"[{symbol}] No data from Groww")
     return None
 
 

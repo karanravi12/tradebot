@@ -233,12 +233,19 @@ def api_costs_summary():
 
 # ── Backtest API ───────────────────────────────────────────────────────────
 
+_backtest_running = False
+
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
-    """Run backtest for given date range. Returns trades, summary, equity_curve."""
+    """Run backtest for given date range. Streams events via Socket.IO, returns immediately."""
+    global _backtest_running
+    if _backtest_running:
+        return jsonify({"error": "Backtest already running"}), 409
+
     data = request.json or {}
     start_str = data.get("start_date", "")
     end_str   = data.get("end_date", "")
+    stream   = data.get("stream", True)
     if not start_str or not end_str:
         return jsonify({"error": "start_date and end_date required (YYYY-MM-DD)"}), 400
     try:
@@ -249,15 +256,35 @@ def api_backtest():
     if start_date > end_date:
         return jsonify({"error": "start_date must be before end_date"}), 400
 
-    try:
-        from backtest import run_backtest
-        result = run_backtest(start_date, end_date, silent=True)
-        if "error" in result:
-            return jsonify(result), 400
-        return jsonify(result)
-    except Exception as e:
-        logger.exception("Backtest failed")
-        return jsonify({"error": str(e)}), 500
+    if not stream:
+        try:
+            from backtest import run_backtest
+            result = run_backtest(start_date, end_date, silent=True)
+            if "error" in result:
+                return jsonify(result), 400
+            return jsonify(result)
+        except Exception as e:
+            logger.exception("Backtest failed")
+            return jsonify({"error": str(e), "trades": [], "summary": {}, "equity_curve": []}), 500
+
+    def _run():
+        global _backtest_running
+        _backtest_running = True
+        try:
+            def emit(msg):
+                socketio.emit("backtest_event", {"msg": msg, "ts": datetime.now().isoformat()}, broadcast=True)
+            socketio.emit("backtest_started", {"start_date": start_str, "end_date": end_str}, broadcast=True)
+            from backtest import run_backtest
+            result = run_backtest(start_date, end_date, emit_fn=emit)
+            socketio.emit("backtest_complete", result, broadcast=True)
+        except Exception as e:
+            logger.exception("Backtest failed")
+            socketio.emit("backtest_complete", {"error": str(e), "trades": [], "summary": {}, "equity_curve": []}, broadcast=True)
+        finally:
+            _backtest_running = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "started", "message": "Backtest running — watch the live feed below"})
 
 
 # ── Chat API ──────────────────────────────────────────────────────────────
