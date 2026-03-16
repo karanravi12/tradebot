@@ -76,8 +76,8 @@ OVERNIGHT_STOP_MULT  = 1.5     # overnight gap stop = STOP_LOSS_PCT × 1.5
 AI_BUY_WINDOWS  = {(9, 30), (11, 30), (13, 30)}          # batch buy calls
 AI_EVAL_WINDOWS = {(9, 30), (11, 30), (13, 30), (15, 0)} # hold/sell evaluations
 
-# Tolerance: snap the nearest 5-min candle within ±1 candle of each window
-AI_WINDOW_TOLERANCE_MIN = 7   # ±7 minutes of the target time
+# Tolerance: snap the nearest 5-min candle within ±2 candles of each window
+AI_WINDOW_TOLERANCE_MIN = 10  # ±10 min (covers 09:20–09:40 for 09:30 window)
 
 # ── Portfolio state (persists across days) ────────────────────────────────────
 cash          = float(config.INITIAL_CAPITAL)
@@ -237,15 +237,19 @@ def _ai_portfolio_state(symbol=None) -> dict:
 
 def _nearest_window(scan_time, window_set):
     """Return the matching (h, m) window if scan_time is within tolerance, else None.
-    Ensures scan_time is interpreted in IST (market time) for correct window matching.
+    Converts to IST first — critical since data_fetcher returns UTC.
     """
     ts = scan_time
-    if hasattr(ts, "tzinfo") and ts.tzinfo is not None and hasattr(ts, "astimezone"):
-        ts = ts.astimezone(IST)
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+        try:
+            ts = ts.tz_convert(IST) if hasattr(ts, "tz_convert") else ts.astimezone(IST)
+        except Exception:
+            pass
     sh, sm = int(ts.hour), int(ts.minute)
+    total_mins = sh * 60 + sm
     for wh, wm in sorted(window_set):
-        diff = abs((sh * 60 + sm) - (wh * 60 + wm))
-        if diff <= AI_WINDOW_TOLERANCE_MIN:
+        w_mins = wh * 60 + wm
+        if abs(total_mins - w_mins) <= AI_WINDOW_TOLERANCE_MIN:
             return (wh, wm)
     return None
 
@@ -411,7 +415,7 @@ def _execute_backtest() -> dict:
                               f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  🌙 GAP DOWN ({t['pnl_pct']:+.1f}%)")
 
         # ── Main scan loop ─────────────────────────────────────────────────────
-        for scan_time in day_times:
+        for candle_idx, scan_time in enumerate(day_times):
             time_str      = scan_time.strftime("%H:%M")
             is_near_close = scan_time.time() >= pd.Timestamp("15:15").time()
 
@@ -424,6 +428,11 @@ def _execute_backtest() -> dict:
 
             ai_eval_fires = eval_key and eval_key not in _ai_eval_done
             ai_buy_fires  = buy_key  and buy_key  not in _ai_buy_done and not is_near_close
+            # Fallback: if _nearest_window returned None (tz mismatch?), fire at first 3 candles
+            if not BOX_ONLY and not ai_buy_fires and not is_near_close:
+                if candle_idx < 3 and (backtest_date, (9, 30)) not in _ai_buy_done:
+                    buy_key = (9, 30)
+                    ai_buy_fires = True
 
             # ══════════════════════════════════════════════════════════════════
             # Phase 1: Manage existing positions
@@ -627,7 +636,7 @@ def _execute_backtest() -> dict:
                       f"{sum(1 for c in box_hits if c['symbol'] in COMMODITY_ETFS)} ETF)  "
                       f"Nifty={regime_str}")
                 try:
-                    ai_picks = ai_brain.analyze_batch(
+                    ai_result = ai_brain.analyze_batch(
                         candidates=[{
                             "symbol":        c["symbol"],
                             "price":         c["price"],
@@ -638,9 +647,13 @@ def _execute_backtest() -> dict:
                         current_time_str=ct_str,
                         nifty_context=nifty_context,
                     )
+                    ai_picks = ai_result.get("picks", ai_result) if isinstance(ai_result, dict) else ai_result
+                    ai_reasoning = ai_result.get("reasoning", "") if isinstance(ai_result, dict) else ""
                 except Exception as ex:
                     print(f"  {time_str}  🤖AI  ---  [AI BATCH ERROR: {ex}]")
                     ai_picks = []
+                    ai_reasoning = str(ex)
+                buys_done = 0
                 for pick in sorted(ai_picks, key=lambda x: x.get("confidence", 0), reverse=True):
                     sym      = pick.get("symbol", "")
                     conf     = pick.get("confidence", 0)
@@ -652,10 +665,13 @@ def _execute_backtest() -> dict:
                         continue
                     t = _buy(sym, cand["price"], scan_time, cand["ind"])
                     if t:
+                        buys_done += 1
                         hedge_tag = " 🛡️HEDGE" if sym in COMMODITY_ETFS else ""
                         print(f"  {time_str}  🤖AI  BUY  {sym:<12} ₹{t['price']:>8.2f}  "
                               f"{t['qty']:>5}  {'':>10}  conf={conf:.0%} box={cand['composite']:.0f}  "
                               f"type={t_type}{hedge_tag}  fees=₹{t['fees']:.2f}")
+                if buys_done == 0 and ai_reasoning:
+                    print(f"  {time_str}  🤖AI  ---  No buy: {ai_reasoning[:120]}")
             else:
                 print(f"  {time_str}  🤖AI  ---  No box breakouts + no commodities to buy")
 

@@ -228,19 +228,15 @@ FINAL RULES:
   • With ₹{cash} cash, ensure you can afford the position
   • confidence ≥ 0.70 required to include any pick
 
-Respond with a JSON array (empty [] if no good setups):
-[
-  {{
-    "symbol": "TICKER",
-    "action": "BUY",
-    "confidence": 0.0 to 1.0,
-    "reasoning": "Cite specific Box + SMC signals: e.g. 'tight box breakout (score=3) + discount zone + bullish OB at 1720 + FVG support — Nifty bullish backdrop'",
-    "position_size_pct": 0.05 to 0.20,
-    "stop_loss_pct": 0.015 to 0.05,
-    "target_pct": 0.03 to 0.12,
-    "trade_type": "equity_breakout" or "commodity_hedge" or "equity_smc"
-  }}
-]"""
+Respond with a JSON object (NOT an array):
+{{
+  "picks": [
+    {{"symbol": "TICKER", "action": "BUY", "confidence": 0.0-1.0, "reasoning": "...", "position_size_pct": 0.05-0.20, "stop_loss_pct": 0.015-0.05, "target_pct": 0.03-0.12, "trade_type": "equity_breakout" or "commodity_hedge" or "equity_smc"}}
+  ],
+  "reasoning": "REQUIRED — Always explain your decision in 1-2 sentences. If no buys: say why (e.g. 'No high-conviction setups — equities in premium zone, no tight box breakouts' or 'Fees would eat the edge on these moves'). If buying: briefly cite the best setup."
+}}
+
+picks can be empty []. reasoning is ALWAYS required."""
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -535,7 +531,7 @@ def analyze_batch(
         nifty_context:   Market regime dict from NIFTYBEES box+SMC analysis (optional).
     """
     if not candidates:
-        return []
+        return {"picks": [], "reasoning": "No candidates provided"}
 
     candidates_formatted = [_fmt_candidate(c) for c in candidates]
     held = list(portfolio_state.get("held_symbols", []))
@@ -554,12 +550,20 @@ def analyze_batch(
 
     try:
         response_text = _call_api(SYSTEM_PROMPT, prompt, "analyze_batch")
-        results = _parse_json_response(response_text)
+        parsed = _parse_json_response(response_text)
 
-        if isinstance(results, dict):
-            results = [results]
+        # Support both new format {picks, reasoning} and legacy array
+        if isinstance(parsed, dict) and "picks" in parsed:
+            picks = parsed.get("picks", [])
+            reasoning = parsed.get("reasoning", "")
+        elif isinstance(parsed, list):
+            picks = parsed
+            reasoning = ""
+        else:
+            picks = [parsed] if isinstance(parsed, dict) else []
+            reasoning = ""
 
-        for r in results:
+        for r in picks:
             logger.info(
                 f"[AI] BUY recommendation: {r.get('symbol', '?')} "
                 f"(confidence={r.get('confidence', 0):.0%}, "
@@ -567,14 +571,14 @@ def analyze_batch(
                 f"{r.get('reasoning', '')[:120]}"
             )
 
-        return results
+        return {"picks": picks, "reasoning": reasoning}
 
     except json.JSONDecodeError as e:
         logger.error(f"[AI] Failed to parse batch response: {e}")
-        return []
+        return {"picks": [], "reasoning": f"Parse error: {e}"}
     except Exception as e:
         logger.error(f"[AI] Batch API error: {e}")
-        return []
+        return {"picks": [], "reasoning": str(e)}
 
 
 CHAT_SYSTEM_PROMPT = """You are an expert Indian stock market (NSE) trading assistant. You have real-time access to the user's paper trading portfolio and can discuss:

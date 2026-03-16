@@ -618,7 +618,8 @@ else:
             "held_symbols": [],
         }
 
-        results = ai_brain.analyze_batch(candidates, portfolio_state)
+        result = ai_brain.analyze_batch(candidates, portfolio_state)
+        results = result.get("picks", result) if isinstance(result, dict) else result
         assert isinstance(results, list), f"Expected list, got {type(results)}"
         for r in results:
             assert "symbol" in r

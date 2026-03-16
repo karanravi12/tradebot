@@ -433,7 +433,7 @@ def _scan_and_trade_impl(portfolio: Portfolio):
         nifty_context = _nifty_context_cache
 
         # Send to AI in batch (1 API call for all candidates)
-        ai_picks = ai_brain.analyze_batch(
+        ai_result = ai_brain.analyze_batch(
             candidates=[{
                 "symbol": c["symbol"],
                 "price": c["price"],
@@ -444,6 +444,7 @@ def _scan_and_trade_impl(portfolio: Portfolio):
             current_time_str=current_time_str,
             nifty_context=nifty_context,
         )
+        ai_picks = ai_result.get("picks", ai_result) if isinstance(ai_result, dict) else ai_result
 
         # Execute AI's buy recommendations
         for pick in ai_picks:
