@@ -1,7 +1,8 @@
 # Gunicorn configuration for AI Trading Bot
 # Flask-SocketIO with async_mode="threading" — use 1 worker + multiple threads
 
-bind        = "127.0.0.1:5001"
+import os
+bind        = f"0.0.0.0:{os.environ.get('PORT', '5001')}"
 workers     = 1          # MUST be 1 — scheduler & socket state live in-process
 threads     = 8          # Handle concurrent HTTP + WebSocket connections
 worker_class = "gthread"
