@@ -200,6 +200,24 @@ def api_bot_stop():
     return jsonify({"status": "not_running"})
 
 
+@app.route("/api/ai/test")
+def api_ai_test():
+    """Test if AI (Claude) is callable — returns status and sample response."""
+    try:
+        import ai_brain
+        response = ai_brain.chat("Reply with exactly: AI is working.", {}, [])
+        return jsonify({
+            "ok": True,
+            "message": "AI is callable",
+            "response_preview": (response or "")[:200],
+        })
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e), "hint": "Set ANTHROPIC_API_KEY in .env"}), 400
+    except Exception as e:
+        logger.exception("AI test failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/groww/test")
 def api_groww_test():
     """Test the Groww live data connection."""

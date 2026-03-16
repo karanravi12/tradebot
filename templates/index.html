@@ -313,6 +313,9 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
       <button onclick="testGroww()" class="btn-ghost py-2 rounded-lg text-xs flex items-center justify-center gap-1.5" data-tip="Test Groww API">
         <span id="groww-icon">⚡</span> Groww
       </button>
+      <button onclick="testAI()" class="btn-ghost py-2 rounded-lg text-xs flex items-center justify-center gap-1.5" data-tip="Test Claude AI">
+        <span id="ai-icon">🤖</span> AI
+      </button>
     </div>
   </div>
 
@@ -1413,6 +1416,15 @@ function testGroww() {
     showToast(d.ok ? `Groww ✓  LTP ₹${d.ltp}` : 'Groww ✗  '+d.error, d.ok?'success':'error');
     setTimeout(()=>el('groww-icon').textContent='⚡',3000);
   });
+}
+function testAI() {
+  const ic = el('ai-icon');
+  if (ic) ic.textContent='⟳';
+  fetch('/api/ai/test').then(r=>r.json().then(d=>({ok:r.ok, d}))).then(({ok,d})=>{
+    if (ic) ic.textContent = d.ok ? '✓' : '✗';
+    showToast(d.ok ? 'AI ✓ '+d.message : 'AI ✗ '+(d.error||d.hint||'Unknown error'), d.ok?'success':'error');
+    setTimeout(()=>{ if (ic) ic.textContent='🤖'; },3000);
+  }).catch(e=>{ if (ic) ic.textContent='✗'; showToast('AI test failed: '+e.message,'error'); setTimeout(()=>{ if (ic) ic.textContent='🤖'; },3000); });
 }
 
 // ── Trades ────────────────────────────────────────────────────────

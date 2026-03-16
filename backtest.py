@@ -236,9 +236,14 @@ def _ai_portfolio_state(symbol=None) -> dict:
 
 
 def _nearest_window(scan_time, window_set):
-    """Return the matching (h, m) window if scan_time is within tolerance, else None."""
-    sh, sm = scan_time.hour, scan_time.minute
-    for wh, wm in window_set:
+    """Return the matching (h, m) window if scan_time is within tolerance, else None.
+    Ensures scan_time is interpreted in IST (market time) for correct window matching.
+    """
+    ts = scan_time
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None and hasattr(ts, "astimezone"):
+        ts = ts.astimezone(IST)
+    sh, sm = int(ts.hour), int(ts.minute)
+    for wh, wm in sorted(window_set):
         diff = abs((sh * 60 + sm) - (wh * 60 + wm))
         if diff <= AI_WINDOW_TOLERANCE_MIN:
             return (wh, wm)
@@ -457,11 +462,15 @@ def _execute_backtest() -> dict:
                 # ── AI evaluation window — ask Claude (hold or sell?) ───────
                 if not BOX_ONLY and ai_eval_fires and symbol in positions:
                     ct_str = scan_time.strftime("%Y-%m-%d %H:%M IST")
-                    ai_dec = ai_brain.analyze_single(
-                        symbol=symbol, df=df_slice, indicators=ind,
-                        portfolio_state=_ai_portfolio_state(symbol),
-                        current_time_str=ct_str,
-                    )
+                    try:
+                        ai_dec = ai_brain.analyze_single(
+                            symbol=symbol, df=df_slice, indicators=ind,
+                            portfolio_state=_ai_portfolio_state(symbol),
+                            current_time_str=ct_str,
+                        )
+                    except Exception as ex:
+                        print(f"  {time_str}  🤖AI  HOLD {symbol:<12}  [AI ERROR: {ex}]")
+                        ai_dec = {"action": "HOLD", "confidence": 0, "reasoning": str(ex)}
                     action = ai_dec.get("action", "HOLD")
                     conf   = ai_dec.get("confidence", 0)
                     if action == "SELL" and conf >= 0.65:
@@ -617,17 +626,21 @@ def _execute_backtest() -> dict:
                       f"({sum(1 for c in box_hits if c['symbol'] not in COMMODITY_ETFS)} eq + "
                       f"{sum(1 for c in box_hits if c['symbol'] in COMMODITY_ETFS)} ETF)  "
                       f"Nifty={regime_str}")
-                ai_picks = ai_brain.analyze_batch(
-                    candidates=[{
-                        "symbol":        c["symbol"],
-                        "price":         c["price"],
-                        "indicators":    c["ind"],
-                        "recent_candles": _fmt_candles(c["df_slice"]),
-                    } for c in box_hits],
-                    portfolio_state=_ai_portfolio_state(),
-                    current_time_str=ct_str,
-                    nifty_context=nifty_context,
-                )
+                try:
+                    ai_picks = ai_brain.analyze_batch(
+                        candidates=[{
+                            "symbol":        c["symbol"],
+                            "price":         c["price"],
+                            "indicators":    c["ind"],
+                            "recent_candles": _fmt_candles(c["df_slice"]),
+                        } for c in box_hits],
+                        portfolio_state=_ai_portfolio_state(),
+                        current_time_str=ct_str,
+                        nifty_context=nifty_context,
+                    )
+                except Exception as ex:
+                    print(f"  {time_str}  🤖AI  ---  [AI BATCH ERROR: {ex}]")
+                    ai_picks = []
                 for pick in sorted(ai_picks, key=lambda x: x.get("confidence", 0), reverse=True):
                     sym      = pick.get("symbol", "")
                     conf     = pick.get("confidence", 0)
