@@ -6,7 +6,7 @@ bind        = f"0.0.0.0:{os.environ.get('PORT', '5001')}"
 workers     = 1          # MUST be 1 — scheduler & socket state live in-process
 threads     = 8          # Handle concurrent HTTP + WebSocket connections
 worker_class = "gthread"
-timeout     = 120        # Long-running scan endpoints need more time
+timeout     = 300        # Backtest + long scans can take several minutes
 keepalive   = 5
 
 # Logging — stdout for cloud platforms (Railway/Render), file for VPS

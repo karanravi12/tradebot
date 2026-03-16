@@ -272,7 +272,7 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
     <div class="flex-1 min-w-0">
       <div class="glitch" data-text="TRADEBOT">TRADEBOT</div>
       <div class="text-[9px] tracking-[3px] mt-0.5" style="color:var(--muted)">NSE · PAPER</div>
-    </div>
+  </div>
     <!-- Dot with ping ring -->
     <div class="relative shrink-0 ml-1">
       <div id="hdr-dot-ping" class="absolute inset-0 rounded-full opacity-0" style="background:rgba(255,59,92,.5)"></div>
@@ -399,17 +399,20 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
     <button onclick="switchTab('settings')" id="nav-settings" class="nav-btn w-full text-left px-3 py-2.5 rounded-lg text-sm flex items-center gap-3">
       <span>⚙</span><span>Settings</span><span class="ml-auto text-[9px] mono opacity-30">4</span>
     </button>
-    <button onclick="switchTab('chat')" id="nav-chat" class="nav-btn w-full text-left px-3 py-2.5 rounded-lg text-sm flex items-center gap-3">
-      <span>◎</span><span>AI Chat</span><span class="ml-auto text-[9px] mono opacity-30">5</span>
+    <button onclick="switchTab('backtest')" id="nav-backtest" class="nav-btn w-full text-left px-3 py-2.5 rounded-lg text-sm flex items-center gap-3">
+      <span>◐</span><span>Backtest</span><span class="ml-auto text-[9px] mono opacity-30">5</span>
     </button>
-  </nav>
+    <button onclick="switchTab('chat')" id="nav-chat" class="nav-btn w-full text-left px-3 py-2.5 rounded-lg text-sm flex items-center gap-3">
+      <span>◎</span><span>AI Chat</span><span class="ml-auto text-[9px] mono opacity-30">6</span>
+    </button>
+</nav>
 
   <!-- ▸ Bottom hint -->
   <div class="mt-auto px-4 py-3 border-t text-[9px]" style="border-color:var(--border);color:var(--muted)">
     <div class="flex items-center gap-1.5 mb-1"><span>⌨</span><span class="tracking-widest">KEYBOARD SHORTCUTS</span></div>
-    <div class="mono opacity-60">1–5 tabs · S scan</div>
+    <div class="mono opacity-60">1–6 tabs · S scan</div>
     <div class="mono opacity-35 mt-1" id="sb-time">--:--</div>
-  </div>
+    </div>
 </aside>
 
 <!-- ════════════════════════════════════════
@@ -500,11 +503,11 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
     <div class="px-5 py-4 border-b flex items-center justify-between" style="border-color:var(--border)">
       <div class="font-semibold text-sm text-white flex items-center gap-2">
         <span style="color:var(--primary)">◈</span> Open Positions
-      </div>
+    </div>
       <span class="mono text-xs px-2.5 py-1 rounded-lg border" id="d-pos-count" style="color:var(--muted);border-color:rgba(0,229,255,.1)">0 / 7</span>
     </div>
     <div class="overflow-x-auto">
-      <table class="w-full text-sm">
+    <table class="w-full text-sm">
         <thead class="border-b" style="border-color:var(--border)">
           <tr>
             <th class="text-left px-5 py-3 slabel">Symbol</th>
@@ -515,11 +518,11 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
             <th class="text-right px-4 py-3 slabel">P&L %</th>
             <th class="text-right px-4 py-3 slabel">Value</th>
           </tr>
-        </thead>
-        <tbody id="positions-table">
+      </thead>
+      <tbody id="positions-table">
           <tr><td colspan="7" class="px-5 py-10 text-center text-xs" style="color:var(--muted)">No open positions — bot will buy when signals are detected</td></tr>
-        </tbody>
-      </table>
+      </tbody>
+    </table>
     </div>
   </div>
 </div>
@@ -538,7 +541,7 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
       <div class="px-5 py-4 text-xs text-center" style="color:var(--muted)">Waiting for activity…</div>
     </div>
   </div>
-</div>
+  </div>
 
 <!-- ─── TRADES ─── -->
 <div id="panel-trades" class="p-6 hidden">
@@ -647,7 +650,7 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
             <input type="checkbox" id="s-pre-filter" checked class="sr-only peer">
             <div class="w-10 h-5 rounded-full transition-all peer-checked:bg-cyan-500" style="background:rgba(0,229,255,.1);border:1px solid rgba(0,229,255,.2)"></div>
             <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-all peer-checked:translate-x-5"></div>
-          </div>
+        </div>
           <span class="text-sm" style="color:var(--muted)">AI Pre-filter (active signals only)</span>
         </label>
         <button onclick="saveTradingConfig()" class="btn-c w-full py-2.5 rounded-xl text-sm font-medium">Save Trading Settings</button>
@@ -676,11 +679,11 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
         <div class="p-3 rounded-xl text-center si"><div class="slabel mb-1">Calls</div><div class="text-lg font-bold mono text-white" id="c-today-calls">0</div></div>
         <div class="p-3 rounded-xl text-center si"><div class="slabel mb-1">Daily Limit</div><div class="text-lg font-bold mono text-white" id="c-daily-limit">$5.00</div></div>
         <div class="p-3 rounded-xl text-center si"><div class="slabel mb-1">All-Time</div><div class="text-lg font-bold mono text-white" id="c-total-cost">$0.00</div></div>
-      </div>
+        </div>
       <div class="flex gap-3 mb-4">
         <input type="number" id="s-api-daily-limit" min="0" step="0.5" value="5" class="si flex-1 px-3 py-2.5 text-sm" placeholder="Daily limit USD">
         <button onclick="saveDailyLimit()" class="btn-c px-5 py-2.5 rounded-xl text-sm font-medium">Set Limit</button>
-      </div>
+        </div>
       <div class="mb-1 flex justify-between text-xs" style="color:var(--muted)"><span>Budget used</span><span id="c-budget-pct">0%</span></div>
       <div class="w-full rounded-full h-2 mb-4" style="background:rgba(0,229,255,.07)">
         <div id="c-budget-bar" class="h-2 rounded-full transition-all" style="width:0%;background:var(--primary)"></div>
@@ -705,6 +708,112 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
   </div>
 </div>
 
+<!-- ─── BACKTEST ─── -->
+<div id="panel-backtest" class="p-6 hidden">
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <div class="text-white font-semibold flex items-center gap-2"><span style="color:var(--primary)">◐</span> Backtest</div>
+      <div class="text-xs mt-0.5" style="color:var(--muted)">Run strategy over historical date range — all live features remain available</div>
+    </div>
+  </div>
+
+  <div class="card p-5 mb-6">
+    <div class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:var(--primary)">Date Range</div>
+    <div class="flex flex-wrap items-end gap-4">
+      <div>
+        <label class="text-xs block mb-1.5" style="color:var(--muted)">Start Date</label>
+        <input type="date" id="bt-start" class="si px-3 py-2.5 text-sm rounded-lg" value="">
+      </div>
+      <div>
+        <label class="text-xs block mb-1.5" style="color:var(--muted)">End Date</label>
+        <input type="date" id="bt-end" class="si px-3 py-2.5 text-sm rounded-lg" value="">
+      </div>
+      <button onclick="runBacktest()" id="bt-run-btn" class="btn-c px-5 py-2.5 rounded-xl text-sm font-medium flex items-center gap-2">
+        <span id="bt-run-icon">▶</span>
+        <span id="bt-run-label">Run Backtest</span>
+      </button>
+      <div id="bt-status" class="text-xs" style="color:var(--muted)"></div>
+    </div>
+    <div class="text-[10px] mt-2" style="color:var(--muted)">Uses Yahoo Finance 5-min data. AI calls count toward API cost. Max ~60 days.</div>
+  </div>
+
+  <div id="bt-results" class="hidden">
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+      <div class="card p-4">
+        <div class="slabel mb-1">Total P&L</div>
+        <div class="text-xl font-bold mono" id="bt-pnl" style="color:var(--muted)">--</div>
+        <div class="text-xs mt-1" id="bt-pnl-pct" style="color:var(--muted)">--%</div>
+      </div>
+      <div class="card p-4">
+        <div class="slabel mb-1">Win Rate</div>
+        <div class="text-xl font-bold mono" id="bt-winrate" style="color:var(--purple)">--%</div>
+        <div class="text-xs mt-1" id="bt-wins-losses" style="color:var(--muted)">-- wins / -- losses</div>
+      </div>
+      <div class="card p-4">
+        <div class="slabel mb-1">Total Trades</div>
+        <div class="text-xl font-bold mono text-white" id="bt-trades">0</div>
+        <div class="text-xs mt-1" id="bt-fees" style="color:var(--amber)">Fees: --</div>
+      </div>
+      <div class="card p-4">
+        <div class="slabel mb-1">Date Range</div>
+        <div class="text-sm mono" id="bt-dates" style="color:var(--muted)">--</div>
+      </div>
+    </div>
+
+    <div class="grid lg:grid-cols-3 gap-6 mb-6">
+      <div class="lg:col-span-2 card p-5">
+        <div class="font-semibold text-white text-sm mb-2">Equity Curve</div>
+        <div style="height:200px"><canvas id="bt-equity-chart"></canvas></div>
+      </div>
+      <div class="card p-5">
+        <div class="font-semibold text-white text-sm mb-2">Trade Outcomes</div>
+        <div style="height:140px" class="flex items-center justify-center">
+          <canvas id="bt-donut-chart"></canvas>
+        </div>
+        <div class="grid grid-cols-2 gap-2 mt-3 text-xs text-center">
+          <div class="rounded-lg p-2" style="background:rgba(0,255,136,.05);border:1px solid rgba(0,255,136,.18)">
+            <div class="font-bold mono" id="bt-dc-wins" style="color:var(--green)">0</div>
+            <div style="color:var(--muted)">Wins</div>
+          </div>
+          <div class="rounded-lg p-2" style="background:rgba(255,59,92,.05);border:1px solid rgba(255,59,92,.18)">
+            <div class="font-bold mono" id="bt-dc-losses" style="color:var(--red)">0</div>
+            <div style="color:var(--muted)">Losses</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="px-5 py-4 border-b flex items-center justify-between" style="border-color:var(--border)">
+        <div class="font-semibold text-sm text-white">Backtest Trades</div>
+        <span class="text-xs" id="bt-trade-count" style="color:var(--muted)">0 trades</span>
+      </div>
+      <div class="overflow-x-auto max-h-80">
+        <table class="w-full text-sm">
+          <thead class="border-b" style="border-color:var(--border)">
+            <tr>
+              <th class="text-left px-5 py-3 slabel">Date</th>
+              <th class="text-left px-4 py-3 slabel">Action</th>
+              <th class="text-left px-4 py-3 slabel">Symbol</th>
+              <th class="text-right px-4 py-3 slabel">Qty</th>
+              <th class="text-right px-4 py-3 slabel">Price</th>
+              <th class="text-right px-4 py-3 slabel">P&L</th>
+              <th class="text-right px-4 py-3 slabel">Reason</th>
+            </tr>
+          </thead>
+          <tbody id="bt-trades-table"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="bt-empty" class="card p-12 text-center" style="color:var(--muted)">
+    <div class="text-4xl mb-3 opacity-50">◐</div>
+    <div class="text-sm font-medium">No backtest run yet</div>
+    <div class="text-xs mt-1">Select a date range and click Run Backtest</div>
+  </div>
+</div>
+
 <!-- ─── CHAT ─── -->
 <div id="panel-chat" class="p-6 hidden" style="height:calc(100vh - 56px)">
   <div class="card flex flex-col" style="height:100%">
@@ -713,18 +822,18 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
       <div>
         <div class="font-semibold text-sm text-white">AI Trading Assistant</div>
         <div class="text-xs" style="color:var(--muted)">Powered by Claude · Ask about your portfolio, strategy, or market</div>
-      </div>
+    </div>
       <div class="ml-auto flex items-center gap-1.5 text-[10px] mono" style="color:var(--purple)">
         <div class="w-1.5 h-1.5 rounded-full pulse" style="background:var(--purple)"></div>
         ONLINE
+        </div>
       </div>
-    </div>
     <div id="chat-messages" class="flex-1 overflow-y-auto p-5 space-y-4">
       <div class="flex gap-3 fade-up">
         <div class="w-8 h-8 rounded-full flex items-center justify-center text-xs shrink-0" style="background:rgba(180,76,246,.14);border:1px solid rgba(180,76,246,.3);color:var(--purple)">AI</div>
         <div class="rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-2xl" style="background:rgba(180,76,246,.06);border:1px solid rgba(180,76,246,.12)">
           Hello! I'm your AI trading assistant. I can see your portfolio in real time — ask me about positions, performance, strategy, or current market conditions.
-        </div>
+    </div>
       </div>
     </div>
     <div class="border-t p-4" style="border-color:var(--border)">
@@ -828,9 +937,11 @@ function switchTab(tab) {
   document.querySelectorAll('[id^="panel-"]').forEach(p => p.classList.add('hidden'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   el('panel-' + tab).classList.remove('hidden');
-  el('nav-'   + tab).classList.add('active');
+  const nav = el('nav-' + tab);
+  if (nav) nav.classList.add('active');
   if (tab === 'trades')   loadTrades();
   if (tab === 'settings') loadConfig();
+  if (tab === 'backtest') setBacktestDefaultDates();
 }
 
 // ── Clock ─────────────────────────────────────────────────────────
@@ -1028,6 +1139,110 @@ function updateDonut(wins, total) {
   donutChart.update('none');
   el('dc-wins').textContent   = wins;
   el('dc-losses').textContent = losses;
+}
+
+// ── Backtest ──────────────────────────────────────────────────────
+let btEquityChart = null, btDonutChart = null;
+
+function setBacktestDefaultDates() {
+  const today = new Date();
+  const end = today.toISOString().slice(0,10);
+  let start = new Date(today);
+  start.setDate(start.getDate() - 7);
+  start = start.toISOString().slice(0,10);
+  const s = el('bt-start'), e = el('bt-end');
+  if (s && !s.value) s.value = start;
+  if (e && !e.value) e.value = end;
+}
+
+function runBacktest() {
+  const start = el('bt-start')?.value, end = el('bt-end')?.value;
+  if (!start || !end) { showToast('Select start and end dates','warning'); return; }
+  const btn = el('bt-run-btn'), icon = el('bt-run-icon'), lbl = el('bt-run-label'), status = el('bt-status');
+  btn.disabled = true; icon.textContent = '⟳'; lbl.textContent = 'Running…'; status.textContent = 'Fetching data & running strategy…';
+  status.style.color = 'var(--primary)';
+
+  fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_date:start,end_date:end}) })
+    .then(r => r.json().then(d => ({ ok:r.ok, data:d })))
+    .then(({ok, data}) => {
+      btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
+      if (!ok) {
+        status.textContent = data.error || 'Backtest failed';
+        status.style.color = 'var(--red)';
+        showToast(data.error || 'Backtest failed','error');
+        return;
+      }
+      status.textContent = 'Done';
+      status.style.color = 'var(--green)';
+      showToast('Backtest complete','success');
+      renderBacktestResults(data);
+    })
+    .catch(err => {
+      btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
+      status.textContent = err.message || 'Request failed';
+      status.style.color = 'var(--red)';
+      showToast(err.message || 'Backtest failed','error');
+    });
+}
+
+function renderBacktestResults(d) {
+  el('bt-empty').classList.add('hidden');
+  el('bt-results').classList.remove('hidden');
+  const s = d.summary || {};
+  const pnl = s.total_pnl ?? 0, pct = s.pnl_pct ?? 0;
+  el('bt-pnl').textContent = (pnl >= 0 ? '+' : '') + inr(pnl);
+  el('bt-pnl').style.color = pColor(pnl);
+  el('bt-pnl-pct').textContent = (pct >= 0 ? '+' : '') + pct + '%';
+  el('bt-pnl-pct').style.color = pColor(pct);
+  el('bt-winrate').textContent = (s.win_rate ?? 0) + '%';
+  el('bt-wins-losses').textContent = `${s.wins ?? 0} wins / ${s.losses ?? 0} losses`;
+  el('bt-trades').textContent = s.total_trades ?? 0;
+  el('bt-fees').textContent = 'Fees: ' + inr(s.total_fees ?? 0);
+  el('bt-dates').textContent = (s.start_date || '') + ' → ' + (s.end_date || '');
+  el('bt-dc-wins').textContent = s.wins ?? 0;
+  el('bt-dc-losses').textContent = s.losses ?? 0;
+
+  const trades = d.trades || [];
+  el('bt-trade-count').textContent = trades.length + ' trades';
+  const tbody = el('bt-trades-table');
+  tbody.innerHTML = trades.length ? trades.map(t => {
+    const isBuy = t.action === 'BUY';
+    const pnlStr = t.pnl !== undefined ? pSign(t.pnl) : '--';
+    const c = t.pnl !== undefined ? pColor(t.pnl) : 'var(--muted)';
+    return `<tr class="border-b" style="border-color:rgba(0,229,255,.04)">
+      <td class="px-5 py-2 text-xs" style="color:var(--muted)">${t.timestamp||'--'}</td>
+      <td class="px-4 py-2 text-xs font-bold" style="color:${isBuy?'var(--green)':'var(--red)'}">${t.action}</td>
+      <td class="px-4 py-2 font-medium text-white">${t.symbol}</td>
+      <td class="px-4 py-2 text-right mono text-sm">${t.qty}</td>
+      <td class="px-4 py-2 text-right mono text-sm">${inr(t.price)}</td>
+      <td class="px-4 py-2 text-right mono text-sm" style="color:${c}">${pnlStr}</td>
+      <td class="px-4 py-2 text-xs" style="color:var(--muted)">${t.reason||'--'}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="7" class="px-5 py-6 text-center text-xs" style="color:var(--muted)">No trades</td></tr>';
+
+  const curve = d.equity_curve || [];
+  if (btEquityChart) btEquityChart.destroy();
+  const ctx = el('bt-equity-chart')?.getContext('2d');
+  if (ctx && curve.length) {
+    const labels = curve.map((_,i) => i === 0 ? 'Start' : 'T' + i);
+    const values = curve.map(c => c.value);
+    const chg = values.length > 1 ? (values[values.length-1] - 500000) / 500000 * 100 : 0;
+    const color = chg >= 0 ? '#00ff88' : '#ff3b5c';
+    btEquityChart = new Chart(ctx, {
+      type:'line',
+      data:{ labels, datasets:[{ label:'Portfolio', data:values, borderColor:color, backgroundColor:chg>=0?'rgba(0,255,136,.1)':'rgba(255,59,92,.1)', fill:true, tension:.4, pointRadius:2 }]},
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{ x:{grid:{color:'rgba(0,229,255,.04)'}, ticks:{maxTicksLimit:6,font:{size:9}} }, y:{grid:{color:'rgba(0,229,255,.04)'}, ticks:{font:{size:9},callback:v=>'₹'+(v/1000).toFixed(0)+'k'} } } }
+    });
+  }
+  if (btDonutChart) btDonutChart.destroy();
+  const ctx2 = el('bt-donut-chart')?.getContext('2d');
+  if (ctx2 && (s.wins || s.losses)) {
+    btDonutChart = new Chart(ctx2, {
+      type:'doughnut',
+      data:{ labels:['Wins','Losses'], datasets:[{ data:[s.wins||0,s.losses||0], backgroundColor:['rgba(0,255,136,.5)','rgba(255,59,92,.35)'], borderColor:['#00ff88','#ff3b5c'], borderWidth:2 }]},
+      options:{ responsive:true, maintainAspectRatio:false, cutout:'70%', plugins:{legend:{display:false}} }
+    });
+  }
 }
 
 // ── Bot Status ────────────────────────────────────────────────────
@@ -1389,7 +1604,8 @@ document.addEventListener('keydown', e => {
   if (e.key==='2') switchTab('feed');
   if (e.key==='3') switchTab('trades');
   if (e.key==='4') switchTab('settings');
-  if (e.key==='5') switchTab('chat');
+  if (e.key==='5') switchTab('backtest');
+  if (e.key==='6') switchTab('chat');
   if (e.key==='s'&&!e.ctrlKey) manualScan();
 });
 

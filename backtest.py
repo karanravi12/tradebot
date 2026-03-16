@@ -22,7 +22,7 @@ Run:  python backtest.py
 
 import logging
 import os
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import pytz
@@ -99,12 +99,14 @@ NIFTY_PROXY = "NIFTYBEES"   # Nifty 50 proxy for market regime
 
 # ── Box drawing helpers ───────────────────────────────────────────────────────
 W = 72
+_silent = False
 
-def box_top():    print("╔" + "═" * (W - 2) + "╗")
-def box_mid():    print("╠" + "═" * (W - 2) + "╣")
-def box_bot():    print("╚" + "═" * (W - 2) + "╝")
-def box_row(txt): print(f"║  {txt:<{W-4}}║")
-def box_sep():    print("╟" + "─" * (W - 2) + "╢")
+def _nout(*a, **k): pass
+def box_top():    (_nout if _silent else print)("╔" + "═" * (W - 2) + "╗")
+def box_mid():    (_nout if _silent else print)("╠" + "═" * (W - 2) + "╣")
+def box_bot():    (_nout if _silent else print)("╚" + "═" * (W - 2) + "╝")
+def box_row(txt): (_nout if _silent else print)(f"║  {txt:<{W-4}}║")
+def box_sep():    (_nout if _silent else print)("╟" + "─" * (W - 2) + "╢")
 
 _DAY = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 
@@ -243,238 +245,253 @@ def _nearest_window(scan_time, window_set):
     return None
 
 
-# ── Load all stock data once (covers full week) ───────────────────────────────
-box_top()
-_mode_label = "BOX THEORY ONLY" if BOX_ONLY else "HYBRID (AI windows + Box auto)"
-_dates_label = f"{BACKTEST_DATES[0]} → {BACKTEST_DATES[-1]}" if len(BACKTEST_DATES) > 1 else str(BACKTEST_DATES[0])
-box_row(f"BACKTEST  —  {_dates_label}  —  {_mode_label}")
-box_row("Strategy: Strict Darvas Box  " + ("(no AI)" if BOX_ONLY else "+ Claude Sonnet 4.6 (AI windows only)"))
-box_mid()
-box_row(f"Starting Capital: ₹{config.INITIAL_CAPITAL:,.0f}  |  Positions carried overnight")
-if not BOX_ONLY:
-    box_row(f"AI Windows: 09:30 (buy+eval)  11:30 (eval)  13:30 (eval)  15:00 (pre-close eval)")
-box_row(f"Exit: Darvas trailing stop (entry box floor + ATR buffer, N-close vol-confirmed)  |  hard stop-loss {config.STOP_LOSS_PCT*100:.0f}%  |  winners run")
-box_row(f"Strict Darvas: 3-bar confirmed box top + 0.2% breakout buffer")
-box_bot()
-print()
+def run_backtest(start_date: date, end_date: date, silent: bool = True) -> dict:
+    """Run backtest for the given date range. Returns dict with trades, summary, equity_curve."""
+    global BACKTEST_DATES, LAST_DATE, cash, positions, trade_history, total_fees, day_summaries
+    global _ai_buy_done, _ai_eval_done, _silent
 
-print(f"Loading {len(config.STOCK_SYMBOLS)} stocks...", end="", flush=True)
+    dates = []
+    d = start_date
+    while d <= end_date:
+        if d.weekday() < 5:
+            dates.append(d)
+        d += timedelta(days=1)
+    if not dates:
+        return {"error": "No weekdays in date range", "trades": [], "summary": {}, "equity_curve": []}
 
-stock_data = {}
-for sym in config.STOCK_SYMBOLS:
-    df = data_fetcher.fetch_intraday(sym)
-    if df is None or df.empty:
-        continue
-    df_ist = df.copy()
-    if df_ist.index.tzinfo is None:
-        df_ist.index = df_ist.index.tz_localize("UTC").tz_convert(IST)
-    else:
-        df_ist.index = df_ist.index.tz_convert(IST)
-    week_start = BACKTEST_DATES[0]
-    week_end   = BACKTEST_DATES[-1]
-    df_week = df_ist[
-        (df_ist.index.date >= week_start) &
-        (df_ist.index.date <= week_end)
-    ]
-    if len(df_week) >= 20:
-        stock_data[sym] = df_week
-
-print(f" {len(stock_data)} stocks with week data.\n")
-
-# ── Day-by-day loop ───────────────────────────────────────────────────────────
-for day_idx, backtest_date in enumerate(BACKTEST_DATES):
-    day_name    = _DAY[backtest_date.weekday()]
-    is_last_day = (backtest_date == LAST_DATE)
-
+    BACKTEST_DATES = dates
+    LAST_DATE = dates[-1]
+    cash = float(config.INITIAL_CAPITAL)
+    positions.clear()
+    trade_history.clear()
+    total_fees = 0.0
+    day_summaries.clear()
     _ai_buy_done.clear()
     _ai_eval_done.clear()
+    _silent = silent
 
-    day_times = sorted(set(
-        ts for df in stock_data.values() for ts in df.index
-        if ts.date() == backtest_date
-        and ts.time() >= pd.Timestamp("09:30").time()
-        and ts.time() <= pd.Timestamp("15:25").time()
-    ))
+    import io, contextlib
+    out = io.StringIO() if silent else None
+    with (contextlib.redirect_stdout(out) if silent else contextlib.nullcontext()):
+        result = _execute_backtest()
+    return result
 
-    if not day_times:
-        print(f"  No data for {day_name} {backtest_date} — skipping\n")
-        continue
 
-    cash_at_open    = cash
-    trades_today    = len(trade_history)
-    portfolio_open  = cash + sum(p["qty"] * p["last_price"] for p in positions.values())
+def _execute_backtest() -> dict:
+    """Execute the backtest using global BACKTEST_DATES. Returns JSON-serializable results."""
+    global cash, positions, trade_history, total_fees, day_summaries, _ai_buy_done, _ai_eval_done
 
-    print(f"╔{'═'*70}╗")
-    held_str = f"{len(positions)} position(s) carried in" if positions else "flat"
-    print(f"║  {day_name:9}  {backtest_date}  │  Cash: ₹{cash:>10,.0f}  │  {held_str:<26}║")
-    print(f"╚{'═'*70}╝")
-    print(f"  {'Time':>5}  {'Who':<4}  {'Act':<4}  {'Symbol':<12}  {'Price':>8}  {'Qty':>5}  {'P&L':>10}  Note")
-    print("  " + "─" * 67)
+# ── Load all stock data once (covers full week) ───────────────────────────────
+    box_top()
+    _mode_label = "BOX THEORY ONLY" if BOX_ONLY else "HYBRID (AI windows + Box auto)"
+    _dates_label = f"{BACKTEST_DATES[0]} → {BACKTEST_DATES[-1]}" if len(BACKTEST_DATES) > 1 else str(BACKTEST_DATES[0])
+    box_row(f"BACKTEST  —  {_dates_label}  —  {_mode_label}")
+    box_row("Strategy: Strict Darvas Box  " + ("(no AI)" if BOX_ONLY else "+ Claude Sonnet 4.6 (AI windows only)"))
+    box_mid()
+    box_row(f"Starting Capital: ₹{config.INITIAL_CAPITAL:,.0f}  |  Positions carried overnight")
+    if not BOX_ONLY:
+        box_row(f"AI Windows: 09:30 (buy+eval)  11:30 (eval)  13:30 (eval)  15:00 (pre-close eval)")
+    box_row(f"Exit: Darvas trailing stop (entry box floor + ATR buffer, N-close vol-confirmed)  |  hard stop-loss {config.STOP_LOSS_PCT*100:.0f}%  |  winners run")
+    box_row(f"Strict Darvas: 3-bar confirmed box top + 0.2% breakout buffer")
+    box_bot()
+    print()
 
-    # ── Overnight gap check ────────────────────────────────────────────────
-    if positions and day_times:
-        first_scan    = day_times[0]
-        overnight_stop = config.STOP_LOSS_PCT * OVERNIGHT_STOP_MULT
-        for symbol in list(positions.keys()):
-            if symbol not in stock_data:
-                continue
-            df_slice   = stock_data[symbol].loc[:first_scan]
-            if df_slice.empty:
-                continue
-            open_price = _safe_float(df_slice["Open"].iloc[-1])
-            avg_price  = positions[symbol]["avg_price"]
-            positions[symbol]["last_price"] = open_price
+    print(f"Loading {len(config.STOCK_SYMBOLS)} stocks...", end="", flush=True)
 
-            gap_loss = (avg_price - open_price) / avg_price if avg_price > 0 else 0
+    stock_data = {}
+    for sym in config.STOCK_SYMBOLS:
+        df = data_fetcher.fetch_intraday(sym)
+        if df is None or df.empty:
+            continue
+        df_ist = df.copy()
+        if df_ist.index.tzinfo is None:
+            df_ist.index = df_ist.index.tz_localize("UTC").tz_convert(IST)
+        else:
+            df_ist.index = df_ist.index.tz_convert(IST)
+        week_start = BACKTEST_DATES[0]
+        week_end   = BACKTEST_DATES[-1]
+        df_week = df_ist[
+            (df_ist.index.date >= week_start) &
+            (df_ist.index.date <= week_end)
+        ]
+        if len(df_week) >= 20:
+            stock_data[sym] = df_week
 
-            ind = {"day_box": box_analyze(df_slice)}
-            if gap_loss >= overnight_stop:
-                t = _sell(symbol, open_price, first_scan, "overnight_gap_down", ind)
-                if t:
-                    print(f"  {first_scan.strftime('%H:%M')}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
-                          f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  🌙 GAP DOWN ({t['pnl_pct']:+.1f}%)")
+    print(f" {len(stock_data)} stocks with week data.\n")
 
-    # ── Main scan loop ─────────────────────────────────────────────────────
-    for scan_time in day_times:
-        time_str      = scan_time.strftime("%H:%M")
-        is_near_close = scan_time.time() >= pd.Timestamp("15:15").time()
+    # ── Day-by-day loop ───────────────────────────────────────────────────────────
+    for day_idx, backtest_date in enumerate(BACKTEST_DATES):
+        day_name    = _DAY[backtest_date.weekday()]
+        is_last_day = (backtest_date == LAST_DATE)
 
-        # Check if this candle falls in an AI window
-        eval_window = _nearest_window(scan_time, AI_EVAL_WINDOWS)
-        buy_window  = _nearest_window(scan_time, AI_BUY_WINDOWS)
+        _ai_buy_done.clear()
+        _ai_eval_done.clear()
 
-        eval_key = (backtest_date, eval_window) if eval_window else None
-        buy_key  = (backtest_date, buy_window)  if buy_window  else None
+        day_times = sorted(set(
+            ts for df in stock_data.values() for ts in df.index
+            if ts.date() == backtest_date
+            and ts.time() >= pd.Timestamp("09:30").time()
+            and ts.time() <= pd.Timestamp("15:25").time()
+        ))
 
-        ai_eval_fires = eval_key and eval_key not in _ai_eval_done
-        ai_buy_fires  = buy_key  and buy_key  not in _ai_buy_done and not is_near_close
+        if not day_times:
+            print(f"  No data for {day_name} {backtest_date} — skipping\n")
+            continue
 
-        # ══════════════════════════════════════════════════════════════════
-        # Phase 1: Manage existing positions
-        # ══════════════════════════════════════════════════════════════════
-        for symbol in list(positions.keys()):
-            if symbol not in stock_data:
-                continue
-            df_slice = stock_data[symbol].loc[:scan_time]
-            if df_slice.empty:
-                continue
+        cash_at_open    = cash
+        trades_today    = len(trade_history)
+        portfolio_open  = cash + sum(p["qty"] * p["last_price"] for p in positions.values())
 
-            current_price = _safe_float(df_slice["Close"].iloc[-1])
-            positions[symbol]["last_price"] = current_price
-            avg_price = positions[symbol]["avg_price"]
-            ind       = {"day_box": box_analyze(df_slice)}
-            # Add SMC at AI eval windows (not every candle — saves time)
-            if not BOX_ONLY and ai_eval_fires:
-                ind["smc"] = smc_analyze(df_slice)
+        print(f"╔{'═'*70}╗")
+        held_str = f"{len(positions)} position(s) carried in" if positions else "flat"
+        print(f"║  {day_name:9}  {backtest_date}  │  Cash: ₹{cash:>10,.0f}  │  {held_str:<26}║")
+        print(f"╚{'═'*70}╝")
+        print(f"  {'Time':>5}  {'Who':<4}  {'Act':<4}  {'Symbol':<12}  {'Price':>8}  {'Qty':>5}  {'P&L':>10}  Note")
+        print("  " + "─" * 67)
 
-            # ── Hard stop-loss (BOX, no AI) ────────────────────────────
-            loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
-            if loss_pct >= config.STOP_LOSS_PCT:
-                t = _sell(symbol, current_price, scan_time, "stop_loss", ind)
-                if t:
-                    print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
-                          f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  ⛔ STOP-LOSS ({t['pnl_pct']:+.1f}%)")
-                continue
+        # ── Overnight gap check ────────────────────────────────────────────────
+        if positions and day_times:
+            first_scan    = day_times[0]
+            overnight_stop = config.STOP_LOSS_PCT * OVERNIGHT_STOP_MULT
+            for symbol in list(positions.keys()):
+                if symbol not in stock_data:
+                    continue
+                df_slice   = stock_data[symbol].loc[:first_scan]
+                if df_slice.empty:
+                    continue
+                open_price = _safe_float(df_slice["Open"].iloc[-1])
+                avg_price  = positions[symbol]["avg_price"]
+                positions[symbol]["last_price"] = open_price
 
-            # ── Friday week-end force-close (BOX, no AI) ───────────────
-            if is_last_day and is_near_close:
-                t = _sell(symbol, current_price, scan_time, "week_end_close", ind)
-                if t:
-                    print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
-                          f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  🏁 WEEK-END ({t['pnl_pct']:+.1f}%)")
-                continue
+                gap_loss = (avg_price - open_price) / avg_price if avg_price > 0 else 0
 
-            # ── AI evaluation window — ask Claude (hold or sell?) ───────
-            if not BOX_ONLY and ai_eval_fires and symbol in positions:
-                ct_str = scan_time.strftime("%Y-%m-%d %H:%M IST")
-                ai_dec = ai_brain.analyze_single(
-                    symbol=symbol, df=df_slice, indicators=ind,
-                    portfolio_state=_ai_portfolio_state(symbol),
-                    current_time_str=ct_str,
-                )
-                action = ai_dec.get("action", "HOLD")
-                conf   = ai_dec.get("confidence", 0)
-                if action == "SELL" and conf >= 0.65:
-                    t = _sell(symbol, current_price, scan_time, "ai_eval", ind)
+                ind = {"day_box": box_analyze(df_slice)}
+                if gap_loss >= overnight_stop:
+                    t = _sell(symbol, open_price, first_scan, "overnight_gap_down", ind)
                     if t:
-                        print(f"  {time_str}  🤖AI  SELL {symbol:<12} ₹{t['price']:>8.2f}  "
-                              f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  AI conf={conf:.0%} ({t['pnl_pct']:+.1f}%)")
-                else:
-                    reason = ai_dec.get("reasoning", "")[:60]
-                    print(f"  {time_str}  🤖AI  HOLD {symbol:<12}  conf={conf:.0%} — {reason}")
-                continue   # skip box signal-sell this interval
+                        print(f"  {first_scan.strftime('%H:%M')}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
+                              f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  🌙 GAP DOWN ({t['pnl_pct']:+.1f}%)")
 
-            # ── Darvas Trailing Stop (every candle, after MIN_HOLD_CANDLES) ──
-            #
-            # ROOT CAUSE FIX: The old code re-detected a fresh box every 5 min.
-            # After a breakout, price consolidates into a micro-box above entry,
-            # and any small dip scored -2/-3 → instant sell at -0.1%.  Winners
-            # were never allowed to run.
-            #
-            # FIX: Use the ENTRY box's floor as the anchor stop.  Trail it UP
-            # only when a new higher confirmed box forms above avg entry price.
-            # Require volume-weighted N-close confirmation before selling:
-            #   vol ≥ 1.5x → 1 close  (high volume: likely real)
-            #   vol ≥ 0.8x → 2 closes (normal: wait for confirmation)
-            #   vol <  0.8x → 3 closes (low vol: classic false breakdown)
-            if _hold_candles(symbol, scan_time) < MIN_HOLD_CANDLES:
-                continue
+        # ── Main scan loop ─────────────────────────────────────────────────────
+        for scan_time in day_times:
+            time_str      = scan_time.strftime("%H:%M")
+            is_near_close = scan_time.time() >= pd.Timestamp("15:15").time()
 
-            pos                 = positions[symbol]
-            trailing_box_bottom = pos.get("trailing_box_bottom")
+            # Check if this candle falls in an AI window
+            eval_window = _nearest_window(scan_time, AI_EVAL_WINDOWS)
+            buy_window  = _nearest_window(scan_time, AI_BUY_WINDOWS)
 
-            if trailing_box_bottom is None:
-                # Fallback for positions without a stored box bottom (safety net)
-                composite = _composite(ind)
-                if composite <= SELL_SCORE_THRESHOLD:
-                    t = _sell(symbol, current_price, scan_time, "box_signal", ind)
-                    if t:
-                        print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
-                              f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  "
-                              f"📉 legacy_box={composite:.0f} ({t['pnl_pct']:+.1f}%)")
-                continue
+            eval_key = (backtest_date, eval_window) if eval_window else None
+            buy_key  = (backtest_date, buy_window)  if buy_window  else None
 
-            box_details    = ind["day_box"].get("details", {})
-            new_box_bottom = box_details.get("box_bottom")
-            new_box_top    = box_details.get("box_top")
-            atr            = box_details.get("atr", current_price * 0.005)
-            vol_ratio      = box_details.get("vol_ratio", 1.0)
+            ai_eval_fires = eval_key and eval_key not in _ai_eval_done
+            ai_buy_fires  = buy_key  and buy_key  not in _ai_buy_done and not is_near_close
 
-            # Trail stop UP: only when new box has a higher bottom AND its
-            # top is above avg entry price (price genuinely moved up)
-            if (new_box_bottom and new_box_top
-                    and new_box_bottom > trailing_box_bottom
-                    and new_box_top > pos["avg_price"]):
-                pos["trailing_box_bottom"] = new_box_bottom
-                trailing_box_bottom = new_box_bottom
+            # ══════════════════════════════════════════════════════════════════
+            # Phase 1: Manage existing positions
+            # ══════════════════════════════════════════════════════════════════
+            for symbol in list(positions.keys()):
+                if symbol not in stock_data:
+                    continue
+                df_slice = stock_data[symbol].loc[:scan_time]
+                if df_slice.empty:
+                    continue
 
-            # Breakdown threshold = trailing floor minus ATR buffer
-            breakdown_threshold = trailing_box_bottom - (atr * ATR_BREAKDOWN_FACTOR)
+                current_price = _safe_float(df_slice["Close"].iloc[-1])
+                positions[symbol]["last_price"] = current_price
+                avg_price = positions[symbol]["avg_price"]
+                ind       = {"day_box": box_analyze(df_slice)}
+                if not BOX_ONLY and ai_eval_fires:
+                    ind["smc"] = smc_analyze(df_slice)
 
-            if current_price < breakdown_threshold:
-                pos["breakdown_count"] = pos.get("breakdown_count", 0) + 1
-                count = pos["breakdown_count"]
-
-                # Volume-weighted confirmation
-                if vol_ratio >= VOL_THRESH:
-                    required_closes = 1   # strong volume → real breakdown
-                elif vol_ratio >= 0.8:
-                    required_closes = 2   # normal → wait
-                else:
-                    required_closes = 3   # low vol → likely whipsaw
-
-                if count >= required_closes:
-                    t = _sell(symbol, current_price, scan_time, "box_trail_stop", ind)
+                # ── Hard stop-loss (BOX, no AI) ────────────────────────────
+                loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
+                if loss_pct >= config.STOP_LOSS_PCT:
+                    t = _sell(symbol, current_price, scan_time, "stop_loss", ind)
                     if t:
                         print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
-                              f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  "
-                              f"📉 trail=₹{trailing_box_bottom:.0f} "
-                              f"({count}cl vol={vol_ratio:.1f}x) ({t['pnl_pct']:+.1f}%)")
-            else:
-                # Price recovered above breakdown threshold → reset counter
-                pos["breakdown_count"] = 0
+                              f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  ⛔ STOP-LOSS ({t['pnl_pct']:+.1f}%)")
+                    continue
 
-        # Mark eval window as done after processing all positions
+                # ── Friday week-end force-close (BOX, no AI) ───────────────
+                if is_last_day and is_near_close:
+                    t = _sell(symbol, current_price, scan_time, "week_end_close", ind)
+                    if t:
+                        print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
+                              f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  🏁 WEEK-END ({t['pnl_pct']:+.1f}%)")
+                    continue
+
+                # ── AI evaluation window — ask Claude (hold or sell?) ───────
+                if not BOX_ONLY and ai_eval_fires and symbol in positions:
+                    ct_str = scan_time.strftime("%Y-%m-%d %H:%M IST")
+                    ai_dec = ai_brain.analyze_single(
+                        symbol=symbol, df=df_slice, indicators=ind,
+                        portfolio_state=_ai_portfolio_state(symbol),
+                        current_time_str=ct_str,
+                    )
+                    action = ai_dec.get("action", "HOLD")
+                    conf   = ai_dec.get("confidence", 0)
+                    if action == "SELL" and conf >= 0.65:
+                        t = _sell(symbol, current_price, scan_time, "ai_eval", ind)
+                        if t:
+                            print(f"  {time_str}  🤖AI  SELL {symbol:<12} ₹{t['price']:>8.2f}  "
+                                  f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  AI conf={conf:.0%} ({t['pnl_pct']:+.1f}%)")
+                    else:
+                        reason = ai_dec.get("reasoning", "")[:60]
+                        print(f"  {time_str}  🤖AI  HOLD {symbol:<12}  conf={conf:.0%} — {reason}")
+                    continue
+
+                # ── Darvas Trailing Stop (every candle, after MIN_HOLD_CANDLES) ──
+                if _hold_candles(symbol, scan_time) < MIN_HOLD_CANDLES:
+                    continue
+
+                pos                 = positions[symbol]
+                trailing_box_bottom = pos.get("trailing_box_bottom")
+
+                if trailing_box_bottom is None:
+                    composite = _composite(ind)
+                    if composite <= SELL_SCORE_THRESHOLD:
+                        t = _sell(symbol, current_price, scan_time, "box_signal", ind)
+                        if t:
+                            print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
+                                  f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  "
+                                  f"📉 legacy_box={composite:.0f} ({t['pnl_pct']:+.1f}%)")
+                    continue
+
+                box_details    = ind["day_box"].get("details", {})
+                new_box_bottom = box_details.get("box_bottom")
+                new_box_top    = box_details.get("box_top")
+                atr            = box_details.get("atr", current_price * 0.005)
+                vol_ratio      = box_details.get("vol_ratio", 1.0)
+
+                if (new_box_bottom and new_box_top
+                        and new_box_bottom > trailing_box_bottom
+                        and new_box_top > pos["avg_price"]):
+                    pos["trailing_box_bottom"] = new_box_bottom
+                    trailing_box_bottom = new_box_bottom
+
+                breakdown_threshold = trailing_box_bottom - (atr * ATR_BREAKDOWN_FACTOR)
+
+                if current_price < breakdown_threshold:
+                    pos["breakdown_count"] = pos.get("breakdown_count", 0) + 1
+                    count = pos["breakdown_count"]
+                    if vol_ratio >= VOL_THRESH:
+                        required_closes = 1
+                    elif vol_ratio >= 0.8:
+                        required_closes = 2
+                    else:
+                        required_closes = 3
+                    if count >= required_closes:
+                        t = _sell(symbol, current_price, scan_time, "box_trail_stop", ind)
+                        if t:
+                            print(f"  {time_str}  BOX   SELL {symbol:<12} ₹{t['price']:>8.2f}  "
+                                  f"{t['qty']:>5}  ₹{t['pnl']:>+8.2f}  "
+                                  f"📉 trail=₹{trailing_box_bottom:.0f} "
+                                  f"({count}cl vol={vol_ratio:.1f}x) ({t['pnl_pct']:+.1f}%)")
+                else:
+                    pos["breakdown_count"] = 0
+
+            # Mark eval window as done after processing all positions
         if not BOX_ONLY and ai_eval_fires and eval_key:
             _ai_eval_done.add(eval_key)
 
@@ -599,106 +616,148 @@ for day_idx, backtest_date in enumerate(BACKTEST_DATES):
             if buy_key:
                 _ai_buy_done.add(buy_key)
 
-    # ── Force-close all positions at EOD (no overnight carry) ──────────────
-    if NO_OVERNIGHT and positions:
-        eod_time = day_candles[-1].name if len(day_candles) > 0 else None
-        for sym in list(positions.keys()):
-            eod_price = positions[sym]["last_price"]
-            t = _sell(sym, eod_price, eod_time or scan_time, "eod_close", {})
-            if t:
-                print(f"  {t['time']}  EOD   SELL {sym:<12} ₹{t['price']:>8.2f}  "
-                      f"{t['qty']:>5}  ₹{t['pnl']:>+10,.2f}  forced close")
+        # ── Force-close all positions at EOD (no overnight carry) ──────────────
+        if NO_OVERNIGHT and positions:
+            eod_time = day_times[-1] if day_times else None
+            for sym in list(positions.keys()):
+                eod_price = positions[sym]["last_price"]
+                t = _sell(sym, eod_price, eod_time or scan_time, "eod_close", {})
+                if t:
+                    print(f"  {t['time']}  EOD   SELL {sym:<12} ₹{t['price']:>8.2f}  "
+                          f"{t['qty']:>5}  ₹{t['pnl']:>+10,.2f}  forced close")
 
-    # ── End of day summary ─────────────────────────────────────────────────
-    today_trades    = trade_history[trades_today:]
-    today_sells     = [t for t in today_trades if t["action"] == "SELL"]
-    day_pnl         = sum(t["pnl"] for t in today_sells)
-    portfolio_close = cash + sum(p["qty"] * p["last_price"] for p in positions.values())
-    overnight_held  = list(positions.keys()) if positions else []
+        # ── End of day summary ─────────────────────────────────────────────────
+        today_trades    = trade_history[trades_today:]
+        today_sells     = [t for t in today_trades if t["action"] == "SELL"]
+        day_pnl         = sum(t["pnl"] for t in today_sells)
+        portfolio_close = cash + sum(p["qty"] * p["last_price"] for p in positions.values())
+        overnight_held  = list(positions.keys()) if positions else []
 
+        print()
+        print(f"  ── {day_name} EOD ──────────────────────────────────────────────────────────")
+        print(f"  Cash: ₹{cash:>10,.2f}  │  Day P&L: ₹{day_pnl:>+8,.2f}  │  "
+              f"Portfolio: ₹{portfolio_close:>10,.2f}")
+        if overnight_held:
+            print(f"  Carrying overnight: {', '.join(overnight_held)}")
+        print()
+
+        day_summaries.append({
+            "date":      backtest_date,
+            "day":       day_name,
+            "trades":    len(today_trades),
+            "pnl":       round(day_pnl, 2),
+            "portfolio": round(portfolio_close, 2),
+            "overnight": overnight_held[:],
+        })
+
+    # ── Final report ──────────────────────────────────────────────────────────────
+    _dates_label = f"{BACKTEST_DATES[0]} → {BACKTEST_DATES[-1]}" if len(BACKTEST_DATES) > 1 else str(BACKTEST_DATES[0])
+    buys    = [t for t in trade_history if t["action"] == "BUY"]
+    sells   = [t for t in trade_history if t["action"] == "SELL"]
+    winners = [t for t in sells if t["pnl"] > 0]
+    losers  = [t for t in sells if t["pnl"] <= 0]
+    sl_sells   = [t for t in sells if t.get("reason") == "stop_loss"]
+    ai_sells   = [t for t in sells if t.get("reason") == "ai_eval"]
+    box_sells  = [t for t in sells if t.get("reason") in ("box_trail_stop", "box_signal")]
+    total_pnl  = sum(t["pnl"] for t in sells)
+    pnl_pct    = total_pnl / config.INITIAL_CAPITAL * 100
+    win_rate  = (len(winners) / len(sells) * 100) if sells else 0
+
+    box_top()
+    box_row(f"RESULTS  —  {_dates_label}")
+    box_mid()
+    box_row(f"Starting Capital  :  ₹{config.INITIAL_CAPITAL:>12,.2f}")
+    box_row(f"Final Cash        :  ₹{cash:>12,.2f}")
+    box_row(f"Total Realized P&L:  ₹{total_pnl:>+12,.2f}   ({pnl_pct:>+.2f}%)")
+    box_row(f"Groww Fees Paid   :  ₹{total_fees:>12,.2f}")
+    box_sep()
+    box_row(f"Total Trades      :  {len(trade_history):>6d}   ({len(buys)} buy / {len(sells)} sell)")
+    box_row(f"Winning Trades    :  {len(winners):>6d}")
+    box_row(f"Losing Trades     :  {len(losers):>6d}")
+    box_row(f"Win Rate          :  {win_rate:>10.1f}%")
+    box_sep()
+    box_row(f"Exits by source   :  🤖 AI={len(ai_sells)}  📉 trail_stop={len(box_sells)}  ⛔ SL={len(sl_sells)}  other={len(sells)-len(ai_sells)-len(box_sells)-len(sl_sells)}")
+    if winners:
+        best = max(winners, key=lambda x: x["pnl"])
+        box_row(f"Best Trade        :  {best['symbol']}  {best['date']} {best['time']}  +₹{best['pnl']:.2f} ({best['pnl_pct']:+.1f}%)")
+    if losers:
+        worst = min(losers, key=lambda x: x["pnl"])
+        box_row(f"Worst Trade       :  {worst['symbol']}  {worst['date']} {worst['time']}  ₹{worst['pnl']:.2f} ({worst['pnl_pct']:+.1f}%)")
+    box_sep()
+    box_row("DAY-BY-DAY BREAKDOWN:")
+    for ds in day_summaries:
+        on = f"  overnight: {', '.join(ds['overnight'])}" if ds['overnight'] else ""
+        box_row(f"  {ds['day']:<9}  {ds['date']}   P&L ₹{ds['pnl']:>+9,.2f}   "
+                f"Portfolio ₹{ds['portfolio']:>10,.2f}{on}")
+    box_bot()
+
+    # ── Strategy Comparison ────────────────────────────────────────────────────────
     print()
-    print(f"  ── {day_name} EOD ──────────────────────────────────────────────────────────")
-    print(f"  Cash: ₹{cash:>10,.2f}  │  Day P&L: ₹{day_pnl:>+8,.2f}  │  "
-          f"Portfolio: ₹{portfolio_close:>10,.2f}")
-    if overnight_held:
-        print(f"  Carrying overnight: {', '.join(overnight_held)}")
-    print()
+    box_top()
+    _dates_str = f"{BACKTEST_DATES[0]} → {BACKTEST_DATES[-1]}" if len(BACKTEST_DATES) > 1 else str(BACKTEST_DATES[0])
+    box_row(f"STRATEGY COMPARISON  —  {_dates_str}")
+    box_mid()
+    box_row(f"  {'Strategy':<34}  {'P&L':>12}  {'Return':>8}  {'Fees':>8}  {'Trades':>7}  {'Win Rate':>9}")
+    box_sep()
+    _active  = "◀ ACTIVE"
+    if BOX_ONLY:
+        box_row(f"  {'Box Theory Only (no AI)':<34}  ₹{total_pnl:>+11,.2f}  {pnl_pct:>+7.2f}%  ₹{total_fees:>6,.0f}  {len(trade_history):>7d}  {win_rate:>8.1f}%  {_active}")
+        box_row(f"  {'Hybrid (AI windows + Box auto)':<34}  {'(run BOX_ONLY=False to measure)':>42}")
+    else:
+        box_row(f"  {'Box Theory Only (no AI)':<34}  {'(run BOX_ONLY=True to measure)':>42}")
+        box_row(f"  {'Hybrid (AI windows + Box auto)':<34}  ₹{total_pnl:>+11,.2f}  {pnl_pct:>+7.2f}%  ₹{total_fees:>6,.0f}  {len(trade_history):>7d}  {win_rate:>8.1f}%  {_active}")
+    box_bot()
 
-    day_summaries.append({
-        "date":      backtest_date,
-        "day":       day_name,
-        "trades":    len(today_trades),
-        "pnl":       round(day_pnl, 2),
-        "portfolio": round(portfolio_close, 2),
-        "overnight": overnight_held[:],
-    })
+    # ── Full trade log ─────────────────────────────────────────────────────────────
+    if trade_history:
+        print("\n  TRADE LOG:")
+        print(f"  {'Date':<9}  {'Time':>5}  {'Who':<4}  {'Act':<4}  {'Symbol':<12}  {'Price':>8}  {'Qty':>5}  {'P&L':>10}  Reason")
+        print("  " + "─" * 78)
+        for t in trade_history:
+            pnl_str = f"₹{t['pnl']:>+8.2f}" if "pnl" in t else f"cost ₹{t['cost']:,.0f}"
+            reason  = t.get("reason", "signal")
+            who     = "🤖AI" if reason in ("ai_eval",) else "BOX "
+            print(f"  {t['date']:<9}  {t['time']:>5}  {who}  {t['action']:<4}  {t['symbol']:<12}  "
+                  f"₹{t['price']:>8.2f}  {t['qty']:>5}  {pnl_str:>10}  {reason}")
 
-# ── Final report ──────────────────────────────────────────────────────────────
-buys    = [t for t in trade_history if t["action"] == "BUY"]
-sells   = [t for t in trade_history if t["action"] == "SELL"]
-winners = [t for t in sells if t["pnl"] > 0]
-losers  = [t for t in sells if t["pnl"] <= 0]
-sl_sells   = [t for t in sells if t.get("reason") == "stop_loss"]
-ai_sells   = [t for t in sells if t.get("reason") == "ai_eval"]
-# box_trail_stop = new Darvas trailing stop; box_signal = legacy fallback
-box_sells  = [t for t in sells if t.get("reason") in ("box_trail_stop", "box_signal")]
-total_pnl  = sum(t["pnl"] for t in sells)
-pnl_pct    = total_pnl / config.INITIAL_CAPITAL * 100
-win_rate  = (len(winners) / len(sells) * 100) if sells else 0
+    # Build equity curve for UI chart
+    capital = float(config.INITIAL_CAPITAL)
+    equity_curve = [{"trade": 0, "value": capital}]
+    for i, t in enumerate(trade_history):
+        if t.get("action") == "SELL" and "pnl" in t:
+            capital += t["pnl"]
+            equity_curve.append({"trade": i + 1, "value": round(capital, 2)})
 
-box_top()
-box_row(f"RESULTS  —  {_dates_label}")
-box_mid()
-box_row(f"Starting Capital  :  ₹{config.INITIAL_CAPITAL:>12,.2f}")
-box_row(f"Final Cash        :  ₹{cash:>12,.2f}")
-box_row(f"Total Realized P&L:  ₹{total_pnl:>+12,.2f}   ({pnl_pct:>+.2f}%)")
-box_row(f"Groww Fees Paid   :  ₹{total_fees:>12,.2f}")
-box_sep()
-box_row(f"Total Trades      :  {len(trade_history):>6d}   ({len(buys)} buy / {len(sells)} sell)")
-box_row(f"Winning Trades    :  {len(winners):>6d}")
-box_row(f"Losing Trades     :  {len(losers):>6d}")
-box_row(f"Win Rate          :  {win_rate:>10.1f}%")
-box_sep()
-box_row(f"Exits by source   :  🤖 AI={len(ai_sells)}  📉 trail_stop={len(box_sells)}  ⛔ SL={len(sl_sells)}  other={len(sells)-len(ai_sells)-len(box_sells)-len(sl_sells)}")
-if winners:
-    best = max(winners, key=lambda x: x["pnl"])
-    box_row(f"Best Trade        :  {best['symbol']}  {best['date']} {best['time']}  +₹{best['pnl']:.2f} ({best['pnl_pct']:+.1f}%)")
-if losers:
-    worst = min(losers, key=lambda x: x["pnl"])
-    box_row(f"Worst Trade       :  {worst['symbol']}  {worst['date']} {worst['time']}  ₹{worst['pnl']:.2f} ({worst['pnl_pct']:+.1f}%)")
-box_sep()
-box_row("DAY-BY-DAY BREAKDOWN:")
-for ds in day_summaries:
-    on = f"  overnight: {', '.join(ds['overnight'])}" if ds['overnight'] else ""
-    box_row(f"  {ds['day']:<9}  {ds['date']}   P&L ₹{ds['pnl']:>+9,.2f}   "
-            f"Portfolio ₹{ds['portfolio']:>10,.2f}{on}")
-box_bot()
-
-# ── Strategy Comparison ────────────────────────────────────────────────────────
-print()
-box_top()
-_dates_str = f"{BACKTEST_DATES[0]} → {BACKTEST_DATES[-1]}" if len(BACKTEST_DATES) > 1 else str(BACKTEST_DATES[0])
-box_row(f"STRATEGY COMPARISON  —  {_dates_str}")
-box_mid()
-box_row(f"  {'Strategy':<34}  {'P&L':>12}  {'Return':>8}  {'Fees':>8}  {'Trades':>7}  {'Win Rate':>9}")
-box_sep()
-_active  = "◀ ACTIVE"
-if BOX_ONLY:
-    box_row(f"  {'Box Theory Only (no AI)':<34}  ₹{total_pnl:>+11,.2f}  {pnl_pct:>+7.2f}%  ₹{total_fees:>6,.0f}  {len(trade_history):>7d}  {win_rate:>8.1f}%  {_active}")
-    box_row(f"  {'Hybrid (AI windows + Box auto)':<34}  {'(run BOX_ONLY=False to measure)':>42}")
-else:
-    box_row(f"  {'Box Theory Only (no AI)':<34}  {'(run BOX_ONLY=True to measure)':>42}")
-    box_row(f"  {'Hybrid (AI windows + Box auto)':<34}  ₹{total_pnl:>+11,.2f}  {pnl_pct:>+7.2f}%  ₹{total_fees:>6,.0f}  {len(trade_history):>7d}  {win_rate:>8.1f}%  {_active}")
-box_bot()
-
-# ── Full trade log ─────────────────────────────────────────────────────────────
-if trade_history:
-    print("\n  TRADE LOG:")
-    print(f"  {'Date':<9}  {'Time':>5}  {'Who':<4}  {'Act':<4}  {'Symbol':<12}  {'Price':>8}  {'Qty':>5}  {'P&L':>10}  Reason")
-    print("  " + "─" * 78)
+    trades = []
     for t in trade_history:
-        pnl_str = f"₹{t['pnl']:>+8.2f}" if "pnl" in t else f"cost ₹{t['cost']:,.0f}"
-        reason  = t.get("reason", "signal")
-        who     = "🤖AI" if reason in ("ai_eval",) else "BOX "
-        print(f"  {t['date']:<9}  {t['time']:>5}  {who}  {t['action']:<4}  {t['symbol']:<12}  "
-              f"₹{t['price']:>8.2f}  {t['qty']:>5}  {pnl_str:>10}  {reason}")
+        ts = {"action": t["action"], "symbol": t["symbol"], "qty": t["qty"], "price": t["price"],
+              "fees": t.get("fees", 0), "reason": t.get("reason", "signal")}
+        if "pnl" in t:
+            ts["pnl"] = t["pnl"]
+            ts["pnl_pct"] = t.get("pnl_pct", 0)
+        if "cost" in t:
+            ts["cost"] = t["cost"]
+        ts["timestamp"] = f"{t.get('date','')} {t.get('time','')}"
+        trades.append(ts)
+
+    return {
+        "trades": trades,
+        "summary": {
+            "total_pnl": total_pnl,
+            "pnl_pct": round(pnl_pct, 2),
+            "win_rate": round(win_rate, 1),
+            "wins": len(winners),
+            "losses": len(losers),
+            "total_trades": len(trade_history),
+            "total_fees": round(total_fees, 2),
+            "final_cash": round(cash, 2),
+            "start_date": str(BACKTEST_DATES[0]),
+            "end_date": str(BACKTEST_DATES[-1]),
+        },
+        "day_summaries": day_summaries,
+        "equity_curve": equity_curve,
+    }
+
+
+if __name__ == "__main__":
+    _execute_backtest()

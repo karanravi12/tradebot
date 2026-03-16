@@ -231,6 +231,35 @@ def api_costs_summary():
     return jsonify(api_costs.get_cost_summary())
 
 
+# ── Backtest API ───────────────────────────────────────────────────────────
+
+@app.route("/api/backtest", methods=["POST"])
+def api_backtest():
+    """Run backtest for given date range. Returns trades, summary, equity_curve."""
+    data = request.json or {}
+    start_str = data.get("start_date", "")
+    end_str   = data.get("end_date", "")
+    if not start_str or not end_str:
+        return jsonify({"error": "start_date and end_date required (YYYY-MM-DD)"}), 400
+    try:
+        start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+        end_date   = datetime.strptime(end_str, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+    if start_date > end_date:
+        return jsonify({"error": "start_date must be before end_date"}), 400
+
+    try:
+        from backtest import run_backtest
+        result = run_backtest(start_date, end_date, silent=True)
+        if "error" in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("Backtest failed")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Chat API ──────────────────────────────────────────────────────────────
 
 @app.route("/api/chat", methods=["POST"])
