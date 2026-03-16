@@ -1,13 +1,15 @@
 """Flask web server for the AI Trading Bot — REST API + WebSocket + UI."""
 
+import json
 import logging
 import os
 import sys
 import threading
+import queue
 from datetime import datetime, date
 
 import pytz
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from flask_socketio import SocketIO
 
 # Load .env file for API key
@@ -234,11 +236,54 @@ def api_costs_summary():
 # ── Backtest API ───────────────────────────────────────────────────────────
 
 _backtest_running = False
+_backtest_queue = None
+_BACKTEST_SENTINEL = object()
+
+
+def _backtest_stream_generator():
+    """SSE generator: reads from queue until complete."""
+    global _backtest_queue
+    if _backtest_queue is None:
+        yield f"data: {json.dumps({'type': 'error', 'msg': 'No backtest running'})}\n\n"
+        return
+    try:
+        while True:
+            try:
+                item = _backtest_queue.get(timeout=0.5)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            if item is _BACKTEST_SENTINEL:
+                break
+            if isinstance(item, dict):
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") == "complete":
+                    break
+    except GeneratorExit:
+        pass
+
+
+@app.route("/api/backtest/stream")
+def api_backtest_stream():
+    """SSE endpoint for backtest live output. Connect after POST /api/backtest."""
+    def gen():
+        for chunk in _backtest_stream_generator():
+            yield chunk
+    return Response(
+        gen(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
 
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
-    """Run backtest for given date range. Streams events via Socket.IO, returns immediately."""
-    global _backtest_running
+    """Run backtest for given date range. Stream via GET /api/backtest/stream (SSE)."""
+    global _backtest_running, _backtest_queue
     if _backtest_running:
         return jsonify({"error": "Backtest already running"}), 409
 
@@ -267,24 +312,28 @@ def api_backtest():
             logger.exception("Backtest failed")
             return jsonify({"error": str(e), "trades": [], "summary": {}, "equity_curve": []}), 500
 
+    _backtest_queue = queue.Queue()
+
     def _run():
-        global _backtest_running
+        global _backtest_running, _backtest_queue
         _backtest_running = True
         try:
             def emit(msg):
-                socketio.emit("backtest_event", {"msg": msg, "ts": datetime.now().isoformat()}, broadcast=True)
-            socketio.emit("backtest_started", {"start_date": start_str, "end_date": end_str}, broadcast=True)
+                if _backtest_queue:
+                    _backtest_queue.put({"type": "event", "msg": msg, "ts": datetime.now().isoformat()})
+            _backtest_queue.put({"type": "started", "start_date": start_str, "end_date": end_str})
             from backtest import run_backtest
             result = run_backtest(start_date, end_date, emit_fn=emit)
-            socketio.emit("backtest_complete", result, broadcast=True)
+            _backtest_queue.put({"type": "complete", "data": result})
         except Exception as e:
             logger.exception("Backtest failed")
-            socketio.emit("backtest_complete", {"error": str(e), "trades": [], "summary": {}, "equity_curve": []}, broadcast=True)
+            _backtest_queue.put({"type": "complete", "data": {"error": str(e), "trades": [], "summary": {}, "equity_curve": []}})
         finally:
+            _backtest_queue.put(_BACKTEST_SENTINEL)
             _backtest_running = False
 
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"status": "started", "message": "Backtest running — watch the live feed below"})
+    return jsonify({"status": "started", "message": "Backtest running — connect to stream", "stream_url": "/api/backtest/stream"})
 
 
 # ── Chat API ──────────────────────────────────────────────────────────────

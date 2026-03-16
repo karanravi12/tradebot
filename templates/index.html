@@ -1172,6 +1172,8 @@ function setBacktestDefaultDates() {
   if (e && !e.value) e.value = end;
 }
 
+let _btEventSource = null;
+
 function runBacktest() {
   const start = el('bt-start')?.value, end = el('bt-end')?.value;
   if (!start || !end) { showToast('Select start and end dates','warning'); return; }
@@ -1185,6 +1187,8 @@ function runBacktest() {
     el('bt-feed-content').textContent = '';
   }
 
+  if (_btEventSource) { _btEventSource.close(); _btEventSource = null; }
+
   fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_date:start,end_date:end,stream:stream}) })
     .then(r => r.json().then(d => ({ ok:r.ok, data:d })))
     .then(({ok, data}) => {
@@ -1196,9 +1200,44 @@ function runBacktest() {
         el('bt-live-feed')?.classList.add('hidden');
         return;
       }
-      if (data.status === 'started') {
+      if (data.status === 'started' && stream) {
         status.textContent = 'Streaming live — watch the feed below';
         showToast('Backtest started — streaming output','info');
+        const url = '/api/backtest/stream';
+        _btEventSource = new EventSource(url);
+        let completed = false;
+        _btEventSource.onmessage = function(e) {
+          try {
+            const d = JSON.parse(e.data);
+            if (d.type === 'event' && d.msg) appendBacktestFeed(d.msg);
+            else if (d.type === 'started') appendBacktestFeed('Backtest started — loading data & running strategy…');
+            else if (d.type === 'complete' && d.data) {
+              completed = true;
+              _btEventSource?.close(); _btEventSource = null;
+              btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
+              if (d.data.error) {
+                status.textContent = d.data.error;
+                status.style.color = 'var(--red)';
+                showToast(d.data.error, 'error');
+                appendBacktestFeed('\n❌ Error: ' + d.data.error);
+              } else {
+                status.textContent = 'Done';
+                status.style.color = 'var(--green)';
+                showToast('Backtest complete', 'success');
+                appendBacktestFeed('\n✓ Backtest complete');
+                renderBacktestResults(d.data);
+              }
+            } else if (d.type === 'error') {
+              appendBacktestFeed(d.msg || 'Stream error');
+            }
+          } catch (err) { console.warn('Backtest stream parse:', err); }
+        };
+        _btEventSource.onerror = function() {
+          if (completed) return;
+          _btEventSource?.close(); _btEventSource = null;
+          btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
+          if (!completed) { status.textContent = 'Stream disconnected'; status.style.color = 'var(--amber)'; }
+        };
       } else if (data.trades !== undefined || data.summary !== undefined) {
         btn.disabled = false; icon.textContent = '▶'; lbl.textContent = 'Run Backtest';
         status.textContent = 'Done';
