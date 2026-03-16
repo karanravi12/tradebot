@@ -1,0 +1,23 @@
+[Unit]
+Description=AI Trading Bot — NSE Flask App
+After=network.target
+
+[Service]
+Type=simple
+User=tradebot
+Group=tradebot
+WorkingDirectory=/var/www/tradebot
+EnvironmentFile=/var/www/tradebot/.env
+ExecStart=/var/www/tradebot/venv/bin/gunicorn -c gunicorn.conf.py app:app
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/tradebot/app.log
+StandardError=append:/var/log/tradebot/app.log
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

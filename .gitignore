@@ -1,0 +1,24 @@
+# Secrets — NEVER commit these
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Runtime data — regenerated on start
+logs/
+portfolio.json
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.specstory/
+.cursorindexingignore
