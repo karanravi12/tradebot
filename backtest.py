@@ -243,8 +243,8 @@ def _nearest_window(scan_time, window_set):
     if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
         try:
             ts = ts.tz_convert(IST) if hasattr(ts, "tz_convert") else ts.astimezone(IST)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"_nearest_window: timezone conversion failed for {ts}: {e}")
     sh, sm = int(ts.hour), int(ts.minute)
     total_mins = sh * 60 + sm
     for wh, wm in sorted(window_set):
@@ -431,7 +431,7 @@ def _execute_backtest() -> dict:
             # Fallback: if _nearest_window returned None (tz mismatch?), fire at first 3 candles
             if not BOX_ONLY and not ai_buy_fires and not is_near_close:
                 if candle_idx < 3 and (backtest_date, (9, 30)) not in _ai_buy_done:
-                    buy_key = (9, 30)
+                    buy_key = (backtest_date, (9, 30))
                     ai_buy_fires = True
 
             # ══════════════════════════════════════════════════════════════════
@@ -515,9 +515,10 @@ def _execute_backtest() -> dict:
                 atr            = box_details.get("atr", current_price * 0.005)
                 vol_ratio      = box_details.get("vol_ratio", 1.0)
 
+                breakeven = pos["avg_price"] * 1.004
                 if (new_box_bottom and new_box_top
                         and new_box_bottom > trailing_box_bottom
-                        and new_box_top > pos["avg_price"]):
+                        and new_box_bottom > breakeven):
                     pos["trailing_box_bottom"] = new_box_bottom
                     trailing_box_bottom = new_box_bottom
 

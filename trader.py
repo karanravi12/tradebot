@@ -50,7 +50,7 @@ def _mark_ai_eval_fired(now: datetime) -> None:
 
 def get_ai_eval_info() -> dict:
     """Returns AI eval timing info for the web UI (last run, next run, countdown)."""
-    now = datetime.now()
+    now = datetime.now(IST)
     if _last_ai_eval_ts is None:
         next_ts = now                    # fires immediately on next scan
         seconds_until = 0

@@ -162,6 +162,14 @@ def api_withdraw():
 
 # ── Bot Control API ──────────────────────────────────────────────────────
 
+def _safe_get_ai_eval() -> dict | None:
+    try:
+        return trader.get_ai_eval_info()
+    except Exception as e:
+        logger.warning(f"get_ai_eval_info failed: {e}")
+        return None
+
+
 @app.route("/api/bot/status")
 def api_bot_status():
     now = datetime.now(IST)
@@ -179,7 +187,7 @@ def api_bot_status():
         "current_time": now.strftime("%Y-%m-%d %H:%M:%S IST"),
         "market_hours": f"{config.MARKET_OPEN_HOUR}:{config.MARKET_OPEN_MINUTE:02d} - {config.MARKET_CLOSE_HOUR}:{config.MARKET_CLOSE_MINUTE:02d}",
         "is_holiday": _is_market_holiday(),
-        "ai_eval": trader.get_ai_eval_info(),
+        "ai_eval": _safe_get_ai_eval(),
     })
 
 

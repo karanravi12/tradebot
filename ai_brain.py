@@ -385,6 +385,8 @@ def analyze_single(
     nifty_context: dict | None = None,
 ) -> dict:
     """Ask Claude AI whether to HOLD or SELL a currently held position."""
+    if df is None or df.empty:
+        return {"action": "HOLD", "reason": "No price data available", "confidence": 0}
     val = df["Close"].iloc[-1]
     current_price = float(val.iloc[0]) if hasattr(val, "iloc") else float(val)
     pos = portfolio_state.get("position", {})
