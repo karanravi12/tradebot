@@ -56,9 +56,13 @@ trader.set_socketio(socketio)
 portfolio = Portfolio.load()
 scheduler_instance = None
 IST = pytz.timezone(config.TIMEZONE)
+_bot_lock = threading.Lock()   # prevents race condition on concurrent start/stop requests
 
 # ── Auto-start bot on launch (cloud-friendly) ──────────────────────────────
-if config.AUTO_START_BOT:
+# Guard: only start in the actual server process, not the werkzeug reloader watcher.
+# WERKZEUG_RUN_MAIN is 'true' in the child (server) and unset in direct runs.
+# It is 'false' only in the reloader parent — we skip there to avoid double schedulers.
+if config.AUTO_START_BOT and os.environ.get("WERKZEUG_RUN_MAIN") != "false":
     scheduler_instance = start_scheduler(portfolio)
     logger.info("AUTO_START_BOT=true — scheduler started automatically")
 
@@ -182,9 +186,13 @@ def api_bot_status():
 @app.route("/api/bot/start", methods=["POST"])
 def api_bot_start():
     global scheduler_instance
-    if scheduler_instance and scheduler_instance.running:
-        return jsonify({"status": "already_running"})
-    scheduler_instance = start_scheduler(portfolio)
+    with _bot_lock:
+        if scheduler_instance and scheduler_instance.running:
+            return jsonify({"status": "already_running"})
+        # Shut down any lingering (non-running) scheduler before creating a fresh one.
+        if scheduler_instance:
+            scheduler_instance.shutdown(wait=False)
+        scheduler_instance = start_scheduler(portfolio)
     socketio.emit("bot_status", {"running": True})
     return jsonify({"status": "started"})
 
@@ -192,11 +200,12 @@ def api_bot_start():
 @app.route("/api/bot/stop", methods=["POST"])
 def api_bot_stop():
     global scheduler_instance
-    if scheduler_instance and scheduler_instance.running:
-        scheduler_instance.shutdown(wait=False)
-        scheduler_instance = None
-        socketio.emit("bot_status", {"running": False})
-        return jsonify({"status": "stopped"})
+    with _bot_lock:
+        if scheduler_instance and scheduler_instance.running:
+            scheduler_instance.shutdown(wait=False)
+            scheduler_instance = None
+            socketio.emit("bot_status", {"running": False})
+            return jsonify({"status": "stopped"})
     return jsonify({"status": "not_running"})
 
 
