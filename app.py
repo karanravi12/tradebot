@@ -74,6 +74,53 @@ def index():
     return render_template("index.html")
 
 
+# ── Zerodha Kite auth ──────────────────────────────────────────────────────
+
+@app.route("/zerodha/login")
+def zerodha_login():
+    """Redirect to Kite login page. Visit this once per day."""
+    try:
+        import kite_live
+        url = kite_live.get_login_url()
+        from flask import redirect
+        return redirect(url)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/zerodha/callback")
+def zerodha_callback():
+    """Kite redirects here with ?request_token=xxx after login."""
+    request_token = request.args.get("request_token")
+    status        = request.args.get("status", "")
+    if not request_token or status != "success":
+        return jsonify({"error": "Login failed or cancelled", "status": status}), 400
+    try:
+        import kite_live
+        access_token = kite_live.set_access_token(request_token)
+        return jsonify({
+            "message": "Zerodha login successful. Kite data source is now active.",
+            "access_token_preview": access_token[:8] + "...",
+        })
+    except Exception as e:
+        logger.error(f"Zerodha callback error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/zerodha/status")
+def zerodha_status():
+    """Check if Kite is authenticated."""
+    try:
+        import kite_live
+        active = kite_live.is_available()
+        return jsonify({
+            "authenticated": active,
+            "login_url": "http://localhost:5001/zerodha/login" if not active else None,
+        })
+    except Exception as e:
+        return jsonify({"authenticated": False, "error": str(e)})
+
+
 # ── Portfolio API ─────────────────────────────────────────────────────────
 
 @app.route("/api/portfolio")
