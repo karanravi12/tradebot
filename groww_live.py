@@ -37,10 +37,10 @@ _client = None          # GrowwAPI instance
 _session_expiry = 0.0   # Unix timestamp when the session token expires
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
-# Groww API enforces ~100 requests/minute. We enforce a minimum gap of 0.75s
-# (~80 req/min) to stay comfortably under the limit. The lock makes this
-# thread-safe so concurrent callers (scheduler + UI) don't race.
-_RATE_LIMIT_DELAY = 0.75   # seconds between API calls (~80 req/min)
+# Groww API enforces 10 req/sec and 300 req/min. We enforce a minimum gap of 0.2s
+# (~300 req/min) to stay at the limit. The lock makes this thread-safe so
+# concurrent callers (scheduler + UI) don't race.
+_RATE_LIMIT_DELAY = 0.20   # seconds between API calls (~300 req/min, matching Groww limit)
 _last_api_call_ts = 0.0
 _rate_limit_lock = threading.Lock()
 _RATE_LIMIT_BACKOFF = 30.0  # seconds to freeze the pipeline after a 429 response
