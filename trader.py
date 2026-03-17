@@ -149,14 +149,17 @@ def _build_portfolio_state(portfolio: Portfolio, current_prices: dict) -> dict:
     }
 
 
-def scan_and_trade(portfolio: Portfolio):
+def scan_and_trade(portfolio: Portfolio, force_ai: bool = False):
     """Main scan cycle: fetch data → collect indicators → AI decides → execute.
 
-    This function is called every SCAN_INTERVAL_MINUTES during market hours.
+    force_ai=True resets the 1-hour interval so AI fires immediately (used by manual scan).
     """
     if not _scan_lock.acquire(blocking=False):
         logger.info("Scan already in progress — skipping this cycle")
         return
+    if force_ai:
+        global _last_ai_eval_ts
+        _last_ai_eval_ts = None
     try:
         _scan_and_trade_impl(portfolio)
     finally:

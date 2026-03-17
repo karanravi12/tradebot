@@ -570,13 +570,16 @@ def analyze_batch(
             picks = [parsed] if isinstance(parsed, dict) else []
             reasoning = ""
 
-        for r in picks:
-            logger.info(
-                f"[AI] BUY recommendation: {r.get('symbol', '?')} "
-                f"(confidence={r.get('confidence', 0):.0%}, "
-                f"size={r.get('position_size_pct', 0):.0%}) — "
-                f"{r.get('reasoning', '')[:120]}"
-            )
+        if picks:
+            for r in picks:
+                logger.info(
+                    f"[AI] BUY recommendation: {r.get('symbol', '?')} "
+                    f"(confidence={r.get('confidence', 0):.0%}, "
+                    f"size={r.get('position_size_pct', 0):.0%}) — "
+                    f"{r.get('reasoning', '')[:120]}"
+                )
+        else:
+            logger.info(f"[AI] No buys — {reasoning[:200]}" if reasoning else "[AI] No buys — no reasoning provided")
 
         return {"picks": picks, "reasoning": reasoning}
 

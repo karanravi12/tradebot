@@ -298,7 +298,7 @@ def api_groww_test():
 @app.route("/api/scan", methods=["POST"])
 def api_manual_scan():
     def run_scan():
-        trader.scan_and_trade(portfolio)
+        trader.scan_and_trade(portfolio, force_ai=True)
     threading.Thread(target=run_scan, daemon=True).start()
     return jsonify({"status": "scan_started"})
 
