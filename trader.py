@@ -6,6 +6,8 @@ import os
 import threading
 from datetime import datetime, timedelta
 
+import pytz
+
 import config
 import data_fetcher
 import ai_brain
@@ -21,6 +23,7 @@ from strategies.luxalgo import analyze as smc_analyze
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+IST = pytz.timezone(config.TIMEZONE)
 
 # SocketIO instance — set by app.py for real-time updates, None in CLI mode
 _socketio = None
@@ -158,7 +161,7 @@ def scan_and_trade(portfolio: Portfolio):
 
 def _scan_and_trade_impl(portfolio: Portfolio):
     logger.info("=" * 60)
-    logger.info(f"AI SCAN STARTED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"AI SCAN STARTED at {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}")
     logger.info(f"Cash: ₹{portfolio.cash:.2f} | Positions: {len(portfolio.positions)}/{config.MAX_POSITIONS}")
     logger.info("=" * 60)
 
@@ -172,7 +175,7 @@ def _scan_and_trade_impl(portfolio: Portfolio):
     #   Order mirrors backtest: stop-loss → AI (eval windows only) → box auto-sell
     #   SMC enriches AI context only — not a standalone sell trigger
     # ══════════════════════════════════════════════════════════════════════
-    now = datetime.now()
+    now = datetime.now(IST)
     current_time_str = now.strftime("%Y-%m-%d %H:%M IST")
     ai_eval_fires = _ai_eval_should_fire(now)
 
@@ -276,6 +279,7 @@ def _scan_and_trade_impl(portfolio: Portfolio):
         entry_ts = portfolio.positions[symbol].get("entry_ts")
         if entry_ts and isinstance(entry_ts, str):
             entry_ts = datetime.fromisoformat(entry_ts)
+        # entry_ts is always naive (stored without tzinfo); compare with naive now
         held_minutes = (datetime.now() - entry_ts).total_seconds() / 60 if entry_ts else 999
 
         if held_minutes >= MIN_HOLD_MINUTES:
@@ -507,7 +511,7 @@ def _scan_and_trade_impl(portfolio: Portfolio):
         "stocks_scanned": scan_count,
         "errors": error_count,
         "ai_candidates": len(ai_candidates),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(IST).isoformat(),
     }
     logger.info(
         f"Scan complete: {scan_count} stocks scanned, {error_count} errors, "

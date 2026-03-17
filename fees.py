@@ -15,11 +15,13 @@ Reference: https://groww.in/pricing
 
 
 def _brokerage(order_value: float) -> float:
-    """Calculate brokerage for one order (buy or sell)."""
+    """Calculate brokerage for one order (buy or sell).
+
+    Groww rule: ₹20 or 0.1% whichever is LOWER, minimum ₹5.
+    """
     pct_charge = order_value * 0.001  # 0.1%
     if pct_charge < 5.0:
-        # Minimum brokerage rule: lower of ₹5 or 2.5% of trade value
-        return min(5.0, order_value * 0.025)
+        return 5.0  # minimum brokerage is always ₹5
     return min(pct_charge, 20.0)  # cap at ₹20
 
 

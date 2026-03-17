@@ -128,6 +128,11 @@ class Portfolio:
                 "qty": total_qty,
                 "avg_price": round(avg_price, 2),
                 "highest_price": max(pos.get("highest_price", price), price),
+                # Preserve Darvas trailing stop fields from the original entry
+                "entry_ts":            pos.get("entry_ts"),
+                "entry_box_bottom":    pos.get("entry_box_bottom"),
+                "trailing_box_bottom": pos.get("trailing_box_bottom"),
+                "breakdown_count":     pos.get("breakdown_count", 0),
             }
         else:
             self.positions[symbol] = {

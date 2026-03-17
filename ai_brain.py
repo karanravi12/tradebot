@@ -11,6 +11,7 @@ import pytz
 
 import config
 import api_costs
+import fees as groww_fees
 
 logger = logging.getLogger(__name__)
 
@@ -393,9 +394,13 @@ def analyze_single(
     pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
 
     trade_value = current_price * qty
-    est_sell_fee = round(trade_value * 0.0015, 2)   # ~0.15% sell leg (STT + brokerage + GST)
+    sell_fee_info = groww_fees.calculate_sell_fees(current_price, qty)
+    est_sell_fee = round(sell_fee_info["total_fees"], 2)
     net_pnl_after_fees = round(unrealized_pnl - est_sell_fee, 2)
-    breakeven_price = round(entry_price * 1.003, 2)  # ~0.3% round-trip to cover both legs
+    # Breakeven: buy fees already paid; just need sell-side fees + buy-side fees to be covered
+    buy_fee_info = groww_fees.calculate_buy_fees(entry_price, qty)
+    total_round_trip_fees = buy_fee_info["total_fees"] + sell_fee_info["total_fees"]
+    breakeven_price = round(entry_price + (total_round_trip_fees / qty if qty > 0 else 0), 2)
 
     entry_box_bottom = pos.get("entry_box_bottom", "N/A")
     trailing_box_bottom = pos.get("trailing_box_bottom", "N/A")

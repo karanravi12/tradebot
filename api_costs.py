@@ -116,7 +116,7 @@ def check_daily_limit() -> tuple[bool, float, float]:
     data = _load_costs()
     spent = data.get("daily", {}).get(today, {}).get("cost_usd", 0.0)
 
-    return spent < daily_limit, spent, daily_limit
+    return spent <= daily_limit, spent, daily_limit
 
 
 def get_cost_summary() -> dict:
