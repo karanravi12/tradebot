@@ -317,6 +317,14 @@ tbody tr:hover { background:rgba(0,229,255,.02); }
         <span id="ai-icon">🤖</span> AI
       </button>
     </div>
+    <!-- Zerodha Kite status -->
+    <div id="kite-bar" class="mt-2 rounded-lg px-3 py-2 flex items-center justify-between text-xs" style="background:rgba(255,255,255,.04);border:1px solid var(--border)">
+      <div class="flex items-center gap-1.5">
+        <span id="kite-dot" class="w-2 h-2 rounded-full shrink-0" style="background:var(--red)"></span>
+        <span id="kite-label" style="color:var(--muted)">Zerodha: not connected</span>
+      </div>
+      <a id="kite-login-btn" href="/zerodha/login" target="_blank" class="px-2 py-0.5 rounded text-[10px] font-semibold" style="background:var(--primary);color:#000;display:none">Login</a>
+    </div>
   </div>
 
   <!-- ▸ Portfolio -->
@@ -1740,6 +1748,26 @@ loadCosts();
 setInterval(loadBotStatus, 15000);
 setInterval(loadPortfolio, 30000);
 setInterval(loadCosts,     30000);
+
+// ── Zerodha Kite status ──────────────────────────────────────────
+function loadKiteStatus() {
+  fetch('/api/zerodha/status').then(r=>r.json()).then(d => {
+    const dot = el('kite-dot'), lbl = el('kite-label'), btn = el('kite-login-btn');
+    if (d.authenticated) {
+      dot.style.background = 'var(--green)';
+      lbl.textContent = 'Zerodha: connected';
+      lbl.style.color = 'var(--green)';
+      btn.style.display = 'none';
+    } else {
+      dot.style.background = 'var(--red)';
+      lbl.textContent = 'Zerodha: not connected';
+      lbl.style.color = 'var(--muted)';
+      btn.style.display = 'block';
+    }
+  }).catch(()=>{});
+}
+loadKiteStatus();
+setInterval(loadKiteStatus, 30000);
 </script>
 </body>
 </html>
