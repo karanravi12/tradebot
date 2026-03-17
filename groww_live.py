@@ -87,8 +87,16 @@ def _get_client():
     """Return a GrowwAPI client with a valid session token, refreshing if needed."""
     global _client, _session_expiry
 
-    # Refresh if no client or token expires within 5 minutes
-    if _client is None or time.time() > _session_expiry - 300:
+    # Fast path — no lock needed if client is valid
+    if _client is not None and time.time() <= _session_expiry - 300:
+        return _client
+
+    # Slow path — acquire lock so only one thread calls get_access_token
+    with _rate_limit_lock:
+        # Re-check after acquiring lock (another thread may have just refreshed)
+        if _client is not None and time.time() <= _session_expiry - 300:
+            return _client
+
         api_key = os.environ.get("GROWW_API_TOKEN", "")
         secret  = os.environ.get("GROWW_API_SECRET", "")
         if not api_key:
