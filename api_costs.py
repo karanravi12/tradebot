@@ -33,10 +33,23 @@ def _load_costs() -> dict:
 
 
 def _save_costs(data: dict):
-    """Save cost data to file."""
-    os.makedirs(os.path.dirname(COSTS_FILE), exist_ok=True)
-    with open(COSTS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    """Save cost data to file. Non-fatal on failure (logs error, doesn't crash)."""
+    try:
+        os.makedirs(os.path.dirname(COSTS_FILE), exist_ok=True)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(COSTS_FILE), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, COSTS_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.error(f"Failed to save API costs: {e}")
 
 
 def record_usage(model: str, input_tokens: int, output_tokens: int, purpose: str = ""):

@@ -1,8 +1,19 @@
-"""Portfolio manager — tracks positions, cash, P&L, and persists state."""
+"""Portfolio manager — tracks positions, cash, P&L, and persists state.
+
+Thread safety:
+  All mutations (buy, sell, deposit, withdraw, reset) are guarded by an RLock.
+  File writes use atomic rename (write to .tmp, then os.replace) to prevent
+  corruption on crash or concurrent access.
+
+  The lock is reentrant (RLock) so methods that call save() internally
+  don't deadlock.
+"""
 
 import json
 import logging
 import os
+import tempfile
+import threading
 from datetime import datetime
 import config
 import fees as groww_fees
@@ -14,22 +25,35 @@ STATE_FILE = os.environ.get(
     os.path.join(os.path.dirname(__file__), "portfolio.json")
 )
 
+# Module-level lock — all Portfolio mutations must hold this.
+# RLock so nested calls (e.g. reset() → save()) don't deadlock.
+_portfolio_lock = threading.RLock()
+
+# Maximum trade history entries kept in memory and on disk.
+# Older entries are trimmed on save(). At ~50 trades/day this is ~20 days.
+_MAX_TRADE_HISTORY = 1000
+
 
 class Portfolio:
     def __init__(self):
         self.cash: float = config.INITIAL_CAPITAL
-        self.initial_capital: float = config.INITIAL_CAPITAL  # actual starting cash — persisted separately from config
-        self.positions: dict = {}  # symbol -> {qty, avg_price, highest_price}
+        self.initial_capital: float = config.INITIAL_CAPITAL
+        self.positions: dict = {}  # symbol -> {qty, avg_price, highest_price, ...}
         self.realized_pnl: float = 0.0
         self.trade_history: list = []
         self.total_trades: int = 0
         self.winning_trades: int = 0
         self.losing_trades: int = 0
-        self.total_fees_paid: float = 0.0  # cumulative Groww fees across all trades
+        self.total_fees_paid: float = 0.0
 
     # ── Serialization ─────────────────────────────────────────────────────
 
     def save(self):
+        """Persist portfolio state to disk using atomic write.
+
+        Writes to a temp file first, then atomically replaces the target.
+        This prevents corruption if the process crashes mid-write or disk fills up.
+        """
         state = {
             "cash": self.cash,
             "initial_capital": self.initial_capital,
@@ -39,14 +63,30 @@ class Portfolio:
             "winning_trades": self.winning_trades,
             "losing_trades": self.losing_trades,
             "total_fees_paid": self.total_fees_paid,
-            "trade_history": self.trade_history[-100:],  # keep last 100
+            "trade_history": self.trade_history[-_MAX_TRADE_HISTORY:],
         }
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2, default=str)
-        logger.debug("Portfolio state saved")
+        try:
+            state_dir = os.path.dirname(STATE_FILE) or "."
+            # Write to temp file in the same directory (same filesystem for atomic rename)
+            fd, tmp_path = tempfile.mkstemp(dir=state_dir, suffix=".tmp", prefix="portfolio_")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(state, f, indent=2, default=str)
+                os.replace(tmp_path, STATE_FILE)  # atomic on POSIX and Windows
+            except Exception:
+                # Clean up temp file if rename failed
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            logger.debug("Portfolio state saved")
+        except Exception as e:
+            logger.error(f"CRITICAL: Failed to save portfolio state: {e}")
 
     @classmethod
     def load(cls) -> "Portfolio":
+        """Load portfolio from disk. Returns fresh portfolio if file missing or corrupt."""
         p = cls()
         if os.path.exists(STATE_FILE):
             try:
@@ -81,7 +121,6 @@ class Portfolio:
             return False
         if price <= 0:
             return False
-        # Need at least enough for 1 share
         return self.cash >= price
 
     def calculate_qty(self, price: float) -> int:
@@ -99,132 +138,142 @@ class Portfolio:
     def buy(self, symbol: str, price: float, qty: int, signal_info: dict, entry_box_bottom: float = None) -> dict | None:
         """Execute a paper buy. Returns trade record or None.
 
+        Thread-safe: acquires _portfolio_lock. Saves state immediately after
+        the trade so a crash won't lose the position.
+
         entry_box_bottom: the Darvas box bottom at breakout time — used as the
-        anchor for the trailing stop.  Trails UP as new higher boxes confirm.
+        anchor for the trailing stop.
         """
-        if qty <= 0 or price <= 0:
-            return None
-
-        cost = price * qty
-        fee_info = groww_fees.calculate_buy_fees(price, qty)
-        total_outflow = cost + fee_info["total_fees"]
-
-        # If total outflow exceeds cash, recalculate qty to fit
-        if total_outflow > self.cash:
-            # Approximate: each share costs price + fee_per_share
-            # fee per share is roughly proportional, so use a slightly reduced budget
-            budget = self.cash * 0.999  # leave a tiny buffer for rounding
-            qty = int(budget // price)
-            if qty <= 0:
+        with _portfolio_lock:
+            if qty <= 0 or price <= 0:
                 return None
+
             cost = price * qty
             fee_info = groww_fees.calculate_buy_fees(price, qty)
             total_outflow = cost + fee_info["total_fees"]
+
             if total_outflow > self.cash:
-                return None
+                budget = self.cash * 0.999
+                qty = int(budget // price)
+                if qty <= 0:
+                    return None
+                cost = price * qty
+                fee_info = groww_fees.calculate_buy_fees(price, qty)
+                total_outflow = cost + fee_info["total_fees"]
+                if total_outflow > self.cash:
+                    return None
 
-        if symbol in self.positions:
-            pos = self.positions[symbol]
-            total_qty = pos["qty"] + qty
-            avg_price = ((pos["avg_price"] * pos["qty"]) + cost) / total_qty
-            self.positions[symbol] = {
-                "qty": total_qty,
-                "avg_price": round(avg_price, 2),
-                "highest_price": max(pos.get("highest_price", price), price),
-                # Preserve Darvas trailing stop fields from the original entry
-                "entry_ts":            pos.get("entry_ts"),
-                "entry_box_bottom":    pos.get("entry_box_bottom"),
-                "trailing_box_bottom": pos.get("trailing_box_bottom"),
-                "breakdown_count":     pos.get("breakdown_count", 0),
-            }
-        else:
-            self.positions[symbol] = {
+            if symbol in self.positions:
+                pos = self.positions[symbol]
+                total_qty = pos["qty"] + qty
+                avg_price = ((pos["avg_price"] * pos["qty"]) + cost) / total_qty
+                self.positions[symbol] = {
+                    "qty": total_qty,
+                    "avg_price": round(avg_price, 2),
+                    "highest_price": max(pos.get("highest_price", price), price),
+                    "entry_ts":            pos.get("entry_ts"),
+                    "entry_box_bottom":    pos.get("entry_box_bottom"),
+                    "trailing_box_bottom": pos.get("trailing_box_bottom"),
+                    "breakdown_count":     pos.get("breakdown_count", 0),
+                }
+            else:
+                self.positions[symbol] = {
+                    "qty": qty,
+                    "avg_price": round(price, 2),
+                    "highest_price": price,
+                    "entry_ts": datetime.now(),
+                    "entry_box_bottom":    entry_box_bottom,
+                    "trailing_box_bottom": entry_box_bottom,
+                    "breakdown_count":     0,
+                }
+
+            self.cash -= total_outflow
+            self.total_fees_paid += fee_info["total_fees"]
+
+            trade = {
+                "timestamp": datetime.now().isoformat(),
+                "action": "BUY",
+                "symbol": symbol,
                 "qty": qty,
-                "avg_price": round(price, 2),
-                "highest_price": price,
-                "entry_ts": datetime.now(),
-                # Darvas trailing stop fields
-                "entry_box_bottom":    entry_box_bottom,   # anchor: the breakout box's floor
-                "trailing_box_bottom": entry_box_bottom,   # trails UP as new boxes form above entry
-                "breakdown_count":     0,                  # consecutive closes below breakdown_threshold
+                "price": round(price, 2),
+                "cost": round(cost, 2),
+                "fees": round(fee_info["total_fees"], 2),
+                "fees_detail": fee_info,
+                "total_outflow": round(total_outflow, 2),
+                "signal": signal_info.get("signal", ""),
+                "composite_score": signal_info.get("composite_score", 0),
+                "cash_remaining": round(self.cash, 2),
             }
+            self.trade_history.append(trade)
+            self.total_trades += 1
 
-        self.cash -= total_outflow
-        self.total_fees_paid += fee_info["total_fees"]
+            # Save immediately — don't risk losing a position on crash
+            self.save()
 
-        trade = {
-            "timestamp": datetime.now().isoformat(),
-            "action": "BUY",
-            "symbol": symbol,
-            "qty": qty,
-            "price": round(price, 2),
-            "cost": round(cost, 2),
-            "fees": round(fee_info["total_fees"], 2),
-            "fees_detail": fee_info,
-            "total_outflow": round(total_outflow, 2),
-            "signal": signal_info.get("signal", ""),
-            "composite_score": signal_info.get("composite_score", 0),
-            "cash_remaining": round(self.cash, 2),
-        }
-        self.trade_history.append(trade)
-        self.total_trades += 1
-        logger.info(
-            f"BUY {symbol}: {qty} shares @ ₹{price:.2f} = ₹{cost:.2f} "
-            f"| Fees: ₹{fee_info['total_fees']:.2f} | Cash: ₹{self.cash:.2f}"
-        )
-        return trade
+            logger.info(
+                f"BUY {symbol}: {qty} shares @ ₹{price:.2f} = ₹{cost:.2f} "
+                f"| Fees: ₹{fee_info['total_fees']:.2f} | Cash: ₹{self.cash:.2f}"
+            )
+            return trade
 
     def sell(self, symbol: str, price: float, reason: str, signal_info: dict) -> dict | None:
-        """Execute a paper sell. Returns trade record or None."""
-        if symbol not in self.positions:
-            return None
+        """Execute a paper sell. Returns trade record or None.
 
-        pos = self.positions[symbol]
-        qty = pos["qty"]
-        avg_price = pos["avg_price"]
-        revenue = price * qty
-        fee_info = groww_fees.calculate_sell_fees(price, qty)
-        net_revenue = revenue - fee_info["total_fees"]
+        Thread-safe: acquires _portfolio_lock. Saves state immediately.
+        """
+        with _portfolio_lock:
+            if symbol not in self.positions:
+                return None
 
-        # P&L is net of all fees (both buy fees already deducted from cash at buy time)
-        buy_cost = avg_price * qty
-        pnl = net_revenue - buy_cost
-        pnl_pct = (pnl / buy_cost * 100) if buy_cost > 0 else 0
+            pos = self.positions[symbol]
+            qty = pos["qty"]
+            avg_price = pos["avg_price"]
+            revenue = price * qty
+            fee_info = groww_fees.calculate_sell_fees(price, qty)
+            net_revenue = revenue - fee_info["total_fees"]
 
-        self.cash += net_revenue
-        self.realized_pnl += pnl
-        self.total_fees_paid += fee_info["total_fees"]
-        del self.positions[symbol]
+            buy_cost = avg_price * qty
+            pnl = net_revenue - buy_cost
+            pnl_pct = (pnl / buy_cost * 100) if buy_cost > 0 else 0
 
-        if pnl > 0:
-            self.winning_trades += 1
-        else:
-            self.losing_trades += 1
+            self.cash += net_revenue
+            self.realized_pnl += pnl
+            self.total_fees_paid += fee_info["total_fees"]
+            del self.positions[symbol]
 
-        trade = {
-            "timestamp": datetime.now().isoformat(),
-            "action": "SELL",
-            "symbol": symbol,
-            "qty": qty,
-            "price": round(price, 2),
-            "revenue": round(revenue, 2),
-            "fees": round(fee_info["total_fees"], 2),
-            "fees_detail": fee_info,
-            "net_revenue": round(net_revenue, 2),
-            "pnl": round(pnl, 2),
-            "pnl_pct": round(pnl_pct, 2),
-            "reason": reason,
-            "signal": signal_info.get("signal", ""),
-            "composite_score": signal_info.get("composite_score", 0),
-            "cash_remaining": round(self.cash, 2),
-        }
-        self.trade_history.append(trade)
-        self.total_trades += 1
-        logger.info(
-            f"SELL {symbol}: {qty} shares @ ₹{price:.2f} = ₹{revenue:.2f} "
-            f"| Fees: ₹{fee_info['total_fees']:.2f} | Net P&L: ₹{pnl:+.2f} ({pnl_pct:+.1f}%) | Reason: {reason}"
-        )
-        return trade
+            if pnl > 0:
+                self.winning_trades += 1
+            else:
+                self.losing_trades += 1
+
+            trade = {
+                "timestamp": datetime.now().isoformat(),
+                "action": "SELL",
+                "symbol": symbol,
+                "qty": qty,
+                "price": round(price, 2),
+                "revenue": round(revenue, 2),
+                "fees": round(fee_info["total_fees"], 2),
+                "fees_detail": fee_info,
+                "net_revenue": round(net_revenue, 2),
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "reason": reason,
+                "signal": signal_info.get("signal", ""),
+                "composite_score": signal_info.get("composite_score", 0),
+                "cash_remaining": round(self.cash, 2),
+            }
+            self.trade_history.append(trade)
+            self.total_trades += 1
+
+            # Save immediately — don't risk lost sell on crash
+            self.save()
+
+            logger.info(
+                f"SELL {symbol}: {qty} shares @ ₹{price:.2f} = ₹{revenue:.2f} "
+                f"| Fees: ₹{fee_info['total_fees']:.2f} | Net P&L: ₹{pnl:+.2f} ({pnl_pct:+.1f}%) | Reason: {reason}"
+            )
+            return trade
 
     # ── Stop Loss Check ───────────────────────────────────────────────────
 
@@ -267,57 +316,60 @@ class Portfolio:
     # ── Wallet Management ───────────────────────────────────────────────
 
     def deposit(self, amount: float) -> dict:
-        """Add money to the virtual wallet."""
-        if amount <= 0:
-            return {"error": "Amount must be positive"}
-        self.cash += amount
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "action": "DEPOSIT",
-            "amount": round(amount, 2),
-            "cash_after": round(self.cash, 2),
-        }
-        self.trade_history.append(record)
-        self.save()
-        logger.info(f"DEPOSIT: +₹{amount:.2f} → Cash: ₹{self.cash:.2f}")
-        return record
+        """Add money to the virtual wallet. Thread-safe."""
+        with _portfolio_lock:
+            if amount <= 0:
+                return {"error": "Amount must be positive"}
+            self.cash += amount
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "action": "DEPOSIT",
+                "amount": round(amount, 2),
+                "cash_after": round(self.cash, 2),
+            }
+            self.trade_history.append(record)
+            self.save()
+            logger.info(f"DEPOSIT: +₹{amount:.2f} → Cash: ₹{self.cash:.2f}")
+            return record
 
     def withdraw(self, amount: float) -> dict:
-        """Remove money from the virtual wallet."""
-        if amount <= 0:
-            return {"error": "Amount must be positive"}
-        if amount > self.cash:
-            return {"error": f"Insufficient cash. Available: ₹{self.cash:.2f}"}
-        self.cash -= amount
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "action": "WITHDRAW",
-            "amount": round(amount, 2),
-            "cash_after": round(self.cash, 2),
-        }
-        self.trade_history.append(record)
-        self.save()
-        logger.info(f"WITHDRAW: -₹{amount:.2f} → Cash: ₹{self.cash:.2f}")
-        return record
+        """Remove money from the virtual wallet. Thread-safe."""
+        with _portfolio_lock:
+            if amount <= 0:
+                return {"error": "Amount must be positive"}
+            if amount > self.cash:
+                return {"error": f"Insufficient cash. Available: ₹{self.cash:.2f}"}
+            self.cash -= amount
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "action": "WITHDRAW",
+                "amount": round(amount, 2),
+                "cash_after": round(self.cash, 2),
+            }
+            self.trade_history.append(record)
+            self.save()
+            logger.info(f"WITHDRAW: -₹{amount:.2f} → Cash: ₹{self.cash:.2f}")
+            return record
 
     def reset(self):
-        """Reset portfolio to initial state."""
-        self.cash = config.INITIAL_CAPITAL
-        self.positions = {}
-        self.realized_pnl = 0.0
-        self.trade_history = []
-        self.total_trades = 0
-        self.winning_trades = 0
-        self.losing_trades = 0
-        self.total_fees_paid = 0.0
-        self.save()
-        logger.info(f"Portfolio RESET to ₹{config.INITIAL_CAPITAL}")
+        """Reset portfolio to initial state. Thread-safe."""
+        with _portfolio_lock:
+            self.cash = config.INITIAL_CAPITAL
+            self.positions = {}
+            self.realized_pnl = 0.0
+            self.trade_history = []
+            self.total_trades = 0
+            self.winning_trades = 0
+            self.losing_trades = 0
+            self.total_fees_paid = 0.0
+            self.save()
+            logger.info(f"Portfolio RESET to ₹{config.INITIAL_CAPITAL}")
 
     def to_dict(self, current_prices: dict) -> dict:
         """Return portfolio state as a JSON-serializable dict for the web UI."""
         total = self.total_value(current_prices)
         unrealized = self.unrealized_pnl(current_prices)
-        initial = self.initial_capital  # use actual starting capital, not config (which changes for backtests)
+        initial = self.initial_capital
         overall_pnl = total - initial
         overall_pct = (overall_pnl / initial * 100) if initial > 0 else 0
         win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0

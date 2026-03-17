@@ -258,10 +258,15 @@ def _check_budget() -> bool:
     return allowed
 
 
+_AI_CALL_TIMEOUT = 60  # seconds — hard limit per API call to prevent blocking the trader thread
+
+
 def _call_api(system: str, prompt: str, purpose: str, temperature: float | None = None) -> str:
     """Make a streaming API call to Claude, track costs, return response text.
 
     Uses streaming to avoid the 10-minute timeout issue in the Anthropic SDK.
+    Enforces a hard timeout (_AI_CALL_TIMEOUT seconds) so a hung API call
+    never blocks the trading engine indefinitely.
     Automatically retries on 429 rate-limit errors with exponential backoff.
     """
     if not _check_budget():
@@ -280,6 +285,7 @@ def _call_api(system: str, prompt: str, purpose: str, temperature: float | None 
             response_text = ""
             input_tokens = 0
             output_tokens = 0
+            start_time = time.time()
 
             with client.messages.stream(
                 model=model,
@@ -287,9 +293,14 @@ def _call_api(system: str, prompt: str, purpose: str, temperature: float | None 
                 temperature=temp,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
+                timeout=_AI_CALL_TIMEOUT,
             ) as stream:
                 for text in stream.text_stream:
                     response_text += text
+                    # Check timeout during streaming — kill if hung
+                    if time.time() - start_time > _AI_CALL_TIMEOUT:
+                        logger.warning(f"[AI] Timeout after {_AI_CALL_TIMEOUT}s ({purpose}) — using partial response")
+                        break
 
                 final = stream.get_final_message()
                 input_tokens = final.usage.input_tokens
@@ -308,6 +319,13 @@ def _call_api(system: str, prompt: str, purpose: str, temperature: float | None 
                     f"Rate limit reached after {max_retries} retries. "
                     "The API allows 30,000 tokens/min. Please wait a minute and try again."
                 ) from e
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+            if attempt < max_retries - 1:
+                wait = 5 * (2 ** attempt)
+                logger.warning(f"[AI] Connection/timeout error ({purpose}), retrying in {wait}s: {e}")
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"AI API unreachable after {max_retries} attempts: {e}") from e
 
 
 def _format_candles(df, n: int = 10) -> str:

@@ -29,16 +29,30 @@ import trader
 from portfolio import Portfolio
 from scheduler import start_scheduler, _is_market_holiday
 
-# ── Logging ───────────────────────────────────────────────────────────────
+# ── Logging (with rotation to prevent disk fill) ─────────────────────────
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+
+from logging.handlers import RotatingFileHandler
+
+# 10 MB per log file, keep 3 backups → max 40 MB on disk
+_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "bot.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "bot.log")),
+        _file_handler,
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -230,13 +244,19 @@ def api_bot_status():
         and not _is_market_holiday()
     )
 
+    bot_running = scheduler_instance is not None and scheduler_instance.is_alive()
+    last_hb = None
+    if scheduler_instance and scheduler_instance.last_heartbeat:
+        last_hb = scheduler_instance.last_heartbeat.isoformat()
+
     return jsonify({
-        "bot_running": scheduler_instance is not None and scheduler_instance.running,
+        "bot_running": bot_running,
         "market_open": is_market_open,
         "current_time": now.strftime("%Y-%m-%d %H:%M:%S IST"),
         "market_hours": f"{config.MARKET_OPEN_HOUR}:{config.MARKET_OPEN_MINUTE:02d} - {config.MARKET_CLOSE_HOUR}:{config.MARKET_CLOSE_MINUTE:02d}",
         "is_holiday": _is_market_holiday(),
         "ai_eval": _safe_get_ai_eval(),
+        "scheduler_heartbeat": last_hb,
     })
 
 
@@ -244,11 +264,11 @@ def api_bot_status():
 def api_bot_start():
     global scheduler_instance
     with _bot_lock:
-        if scheduler_instance and scheduler_instance.running:
+        if scheduler_instance and scheduler_instance.is_alive():
             return jsonify({"status": "already_running"})
         # Shut down any lingering (non-running) scheduler before creating a fresh one.
         if scheduler_instance:
-            scheduler_instance.shutdown(wait=False)
+            scheduler_instance.shutdown()
         scheduler_instance = start_scheduler(portfolio)
     socketio.emit("bot_status", {"running": True})
     return jsonify({"status": "started"})
@@ -258,8 +278,8 @@ def api_bot_start():
 def api_bot_stop():
     global scheduler_instance
     with _bot_lock:
-        if scheduler_instance and scheduler_instance.running:
-            scheduler_instance.shutdown(wait=False)
+        if scheduler_instance and scheduler_instance.is_alive():
+            scheduler_instance.shutdown()
             scheduler_instance = None
             socketio.emit("bot_status", {"running": False})
             return jsonify({"status": "stopped"})
@@ -366,10 +386,16 @@ def api_backtest_stream():
 
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
-    """Run backtest for given date range. Stream via GET /api/backtest/stream (SSE)."""
+    """Run backtest for given date range. Stream via GET /api/backtest/stream (SSE).
+
+    Safety: refuses to run while the live bot is active to prevent the backtest
+    engine from interfering with live portfolio state.
+    """
     global _backtest_running, _backtest_queue
     if _backtest_running:
         return jsonify({"error": "Backtest already running"}), 409
+    if scheduler_instance and scheduler_instance.running:
+        return jsonify({"error": "Cannot backtest while live bot is running. Stop the bot first."}), 409
 
     data = request.json or {}
     start_str = data.get("start_date", "")

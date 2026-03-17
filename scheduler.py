@@ -53,18 +53,24 @@ class SimpleScheduler:
     Wakes every 30 seconds, checks the real wall-clock time, and fires
     scan_and_trade() whenever the current minute aligns with the scan interval.
     Uses _last_scan_minute to prevent double-firing within the same minute.
+
+    Heartbeat: updates `last_heartbeat` every loop iteration. The web UI
+    can check this to detect a dead scheduler thread.
     """
 
     def __init__(self):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.running = False
-        self._last_scan_minute = -1  # total minutes from midnight of last fired scan
+        self._last_scan_minute = -1
+        self.last_heartbeat: datetime | None = None  # updated every 30s loop
+        self._consecutive_errors = 0  # track repeated failures
 
     def _loop(self, portfolio: Portfolio):
         logger.info("Scheduler thread started (sleep/wake resilient)")
         while not self._stop.is_set():
             try:
+                self.last_heartbeat = datetime.now(IST)
                 now = datetime.now(IST)
                 total_minute = now.hour * 60 + now.minute
                 interval = config.SCAN_INTERVAL_MINUTES
@@ -78,8 +84,15 @@ class SimpleScheduler:
                     logger.info(f"Scheduler firing scan at {now.strftime('%H:%M IST')}")
                     try:
                         trader.scan_and_trade(portfolio)
+                        self._consecutive_errors = 0
                     except Exception as exc:
-                        logger.error(f"Scan error: {exc}", exc_info=True)
+                        self._consecutive_errors += 1
+                        logger.error(f"Scan error ({self._consecutive_errors} consecutive): {exc}", exc_info=True)
+                        if self._consecutive_errors >= 5:
+                            logger.critical(
+                                f"SCHEDULER: {self._consecutive_errors} consecutive scan failures. "
+                                "The trading engine may be broken. Check logs immediately."
+                            )
 
             except Exception as exc:
                 logger.error(f"Scheduler loop error: {exc}", exc_info=True)
@@ -90,19 +103,32 @@ class SimpleScheduler:
         self.running = False
         logger.info("Scheduler thread stopped")
 
+    def is_alive(self) -> bool:
+        """True if the scheduler thread is running and has sent a heartbeat recently."""
+        if not self.running or self._thread is None:
+            return False
+        if not self._thread.is_alive():
+            self.running = False  # mark as dead so UI reflects it
+            return False
+        return True
+
     def start(self, portfolio: Portfolio):
         self._stop.clear()
         self.running = True
+        self._consecutive_errors = 0
         self._thread = threading.Thread(
             target=self._loop, args=[portfolio], daemon=True, name="TradingScheduler"
         )
         self._thread.start()
 
-    def shutdown(self, wait: bool = False):
+    def shutdown(self, wait: bool = True):
+        """Stop the scheduler. Waits up to 10s for the thread to finish."""
         self._stop.set()
         self.running = False
-        if wait and self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                logger.warning("Scheduler thread did not stop within 10s")
 
 
 def start_scheduler(portfolio: Portfolio) -> SimpleScheduler:

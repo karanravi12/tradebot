@@ -1,18 +1,21 @@
-"""Groww Partner API client — single source of truth for all market data.
+"""Groww Partner API client — primary data source for all market data.
+
+Connection flow:
+  1. On import, checks GROWW_API_TOKEN env var (is_available()).
+  2. First API call triggers _get_client():
+     a. Exchanges GROWW_API_TOKEN + GROWW_API_SECRET for a session token.
+     b. Session token is cached; refreshed 5 minutes before expiry.
+     c. Groww invalidates tokens at 6:00 AM IST daily regardless of JWT exp.
+  3. All API calls go through _rate_limit() to respect 10 req/sec, 300 req/min.
+  4. On 429 (rate limit), _apply_backoff() freezes ALL calls for 30s.
+
+Rate limits (enforced server-side by Groww):
+  - 10 requests/second
+  - 300 requests/minute
+  We enforce a 0.20s gap between calls (~300 req/min at max throughput).
 
 Uses the official growwapi Python SDK.
 Docs: https://groww.in/trade-api/docs/python-sdk
-
-Authentication:
-  GROWW_API_TOKEN = long-lived auth key (auth-totp role)
-  GROWW_API_SECRET = secret — used to exchange for a ~12h session token
-  Session tokens are cached and auto-refreshed before expiry.
-
-Provides:
-  - Live LTP / quote           → fetch_ltp(), fetch_quote()
-  - Today's intraday candles   → fetch_intraday_candles()
-  - Historical candles (date range) → fetch_historical_candles()
-  - Multi-day candles          → fetch_multi_day_candles()
 
 Strictly READ-ONLY. No order placement. No account access.
 """
@@ -33,8 +36,14 @@ logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 
-_client = None          # GrowwAPI instance
+_client = None          # GrowwAPI instance (cached, refreshed when session expires)
 _session_expiry = 0.0   # Unix timestamp when the session token expires
+
+# ── Auth lock ────────────────────────────────────────────────────────────────
+# Separate from rate limiter. Protects _client and _session_expiry during token
+# refresh. Previously these shared _rate_limit_lock, which meant a token refresh
+# blocked all API calls (and vice versa) — causing unnecessary contention.
+_auth_lock = threading.Lock()
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 # Groww API enforces 10 req/sec and 300 req/min. We enforce a minimum gap of 0.2s
@@ -100,15 +109,23 @@ def _jwt_expiry(token: str) -> float:
 
 
 def _get_client():
-    """Return a GrowwAPI client with a valid session token, refreshing if needed."""
+    """Return a GrowwAPI client with a valid session token, refreshing if needed.
+
+    Uses double-checked locking:
+      1. Fast path (no lock): if client exists and token won't expire in 5 min, return it.
+      2. Slow path (with _auth_lock): re-check, then exchange API key for session token.
+
+    _auth_lock is separate from _rate_limit_lock so a token refresh doesn't block
+    ongoing API calls, and vice versa.
+    """
     global _client, _session_expiry
 
-    # Fast path — no lock needed if client is valid
+    # Fast path — no lock needed if client is valid (token won't expire for 5+ min)
     if _client is not None and time.time() <= _session_expiry - 300:
         return _client
 
-    # Slow path — acquire lock so only one thread calls get_access_token
-    with _rate_limit_lock:
+    # Slow path — acquire auth lock so only one thread calls get_access_token
+    with _auth_lock:
         # Re-check after acquiring lock (another thread may have just refreshed)
         if _client is not None and time.time() <= _session_expiry - 300:
             return _client
@@ -123,7 +140,8 @@ def _get_client():
         if secret:
             session_token = GrowwAPI.get_access_token(api_key=api_key, secret=secret)
             _session_expiry = _jwt_expiry(session_token)
-            logger.debug(f"Groww session token refreshed, expires at {datetime.fromtimestamp(_session_expiry, tz=IST).strftime('%Y-%m-%d %H:%M IST')}")
+            logger.info(f"Groww session token refreshed, expires at "
+                        f"{datetime.fromtimestamp(_session_expiry, tz=IST).strftime('%Y-%m-%d %H:%M IST')}")
         else:
             session_token = api_key
             _session_expiry = _jwt_expiry(session_token)

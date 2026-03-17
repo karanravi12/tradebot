@@ -88,9 +88,16 @@ def set_socketio(sio):
 
 
 def _emit(event: str, data: dict):
-    """Emit a WebSocket event if SocketIO is available."""
+    """Emit a WebSocket event if SocketIO is available.
+
+    Non-blocking: catches and logs errors so a broken WebSocket connection
+    never interrupts the trading engine.
+    """
     if _socketio:
-        _socketio.emit(event, data)
+        try:
+            _socketio.emit(event, data)
+        except Exception as e:
+            logger.debug(f"SocketIO emit failed ({event}): {e}")
 
 
 # LTP cache from the previous scan — used to detect movers without candle data
@@ -115,27 +122,34 @@ def _ensure_csv():
 
 
 def _log_trade_csv(trade: dict, portfolio_value: float):
-    """Append a trade record to the CSV log."""
-    _ensure_csv()
-    row = [
-        trade.get("timestamp", ""),
-        trade.get("action", ""),
-        trade.get("symbol", ""),
-        trade.get("qty", 0),
-        trade.get("price", 0),
-        trade.get("cost", trade.get("revenue", 0)),
-        trade.get("pnl", ""),
-        trade.get("pnl_pct", ""),
-        trade.get("reason", ""),
-        trade.get("signal", ""),
-        trade.get("confidence", 0),
-        trade.get("cash_remaining", 0),
-        round(portfolio_value, 2),
-        trade.get("ai_reasoning", ""),
-    ]
-    with open(TRADES_CSV, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(row)
+    """Append a trade record to the CSV log.
+
+    Catches I/O errors so a full disk doesn't crash the trading engine.
+    The trade is already saved in portfolio.json — CSV is a supplementary log.
+    """
+    try:
+        _ensure_csv()
+        row = [
+            trade.get("timestamp", ""),
+            trade.get("action", ""),
+            trade.get("symbol", ""),
+            trade.get("qty", 0),
+            trade.get("price", 0),
+            trade.get("cost", trade.get("revenue", 0)),
+            trade.get("pnl", ""),
+            trade.get("pnl_pct", ""),
+            trade.get("reason", ""),
+            trade.get("signal", ""),
+            trade.get("confidence", 0),
+            trade.get("cash_remaining", 0),
+            round(portfolio_value, 2),
+            trade.get("ai_reasoning", ""),
+        ]
+        with open(TRADES_CSV, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(row)
+    except Exception as e:
+        logger.error(f"Failed to write trade CSV: {e}")
 
 
 def _build_portfolio_state(portfolio: Portfolio, current_prices: dict) -> dict:
@@ -219,6 +233,7 @@ def _scan_and_trade_impl(portfolio: Portfolio):
         df = data_fetcher.fetch_data(symbol)
         if df is None:
             error_count += 1
+            logger.warning(f"[{symbol}] Cannot fetch data for HELD position — stop-loss check skipped")
             continue
 
         current_price = _safe_price(df)
@@ -408,12 +423,25 @@ def _scan_and_trade_impl(portfolio: Portfolio):
     scan_symbols = [s for s in config.STOCK_SYMBOLS if s not in portfolio.positions]
     always_scan  = COMMODITY_ETFS | {NIFTY_PROXY}
 
+    # Batch LTP: try Groww first, fall back to Kite if Groww returns nothing.
+    # This mirrors the same Groww→Kite fallback used for candle data.
+    batch_ltp = {}
     try:
         import groww_live
-        batch_ltp = groww_live.fetch_batch_ltp(scan_symbols)
+        if groww_live.is_available():
+            batch_ltp = groww_live.fetch_batch_ltp(scan_symbols)
     except Exception as e:
-        logger.warning(f"Batch LTP pre-screen failed, scanning all symbols: {e}")
-        batch_ltp = {}
+        logger.warning(f"Groww batch LTP failed: {e}")
+
+    if not batch_ltp:
+        try:
+            import kite_live
+            if kite_live.is_available():
+                batch_ltp = kite_live.fetch_batch_ltp(scan_symbols)
+                if batch_ltp:
+                    logger.info(f"Batch LTP: using Kite fallback ({len(batch_ltp)} symbols)")
+        except Exception as e:
+            logger.warning(f"Kite batch LTP fallback also failed: {e}")
 
     # Determine which symbols to fetch full candles for
     if batch_ltp:
@@ -437,12 +465,33 @@ def _scan_and_trade_impl(portfolio: Portfolio):
     else:
         to_fetch = scan_symbols   # fallback: scan everything
 
+    # Circuit breaker: if >50% of fetches fail in a row, the data pipeline is
+    # likely broken (API down, token expired, rate limited). Stop wasting time
+    # and API calls on the remaining symbols — they'll fail too.
+    CIRCUIT_BREAKER_STREAK = 15   # consecutive failures before we stop scanning
+    consecutive_errors = 0
+
     for symbol in to_fetch:
         scan_count += 1
+
+        # Circuit breaker tripped — stop scanning remaining symbols
+        if consecutive_errors >= CIRCUIT_BREAKER_STREAK:
+            remaining = len(to_fetch) - scan_count
+            logger.error(
+                f"CIRCUIT BREAKER: {consecutive_errors} consecutive fetch failures — "
+                f"skipping remaining {remaining} symbols. "
+                f"Check Groww token expiry and Kite login status."
+            )
+            error_count += remaining
+            break
+
         df = data_fetcher.fetch_data(symbol)
         if df is None:
             error_count += 1
+            consecutive_errors += 1
             continue
+
+        consecutive_errors = 0  # reset on success
 
         current_price = _safe_price(df)
         current_prices[symbol] = current_price
@@ -547,10 +596,10 @@ def _scan_and_trade_impl(portfolio: Portfolio):
         _emit("ai_eval_fired", get_ai_eval_info())
 
     # ══════════════════════════════════════════════════════════════════════
-    # Phase 4: Save state and log summary
+    # Phase 4: Log summary and push UI updates
+    #   Portfolio is already saved after each buy/sell — no need for
+    #   another save() here. This avoids a redundant disk write per scan.
     # ══════════════════════════════════════════════════════════════════════
-    portfolio.save()
-
     summary = portfolio.summary(current_prices)
     logger.info(f"\n{summary}")
     scan_summary = {
