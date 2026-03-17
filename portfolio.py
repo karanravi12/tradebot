@@ -9,7 +9,10 @@ import fees as groww_fees
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = os.path.join(os.path.dirname(__file__), "portfolio.json")
+STATE_FILE = os.environ.get(
+    "PORTFOLIO_PATH",
+    os.path.join(os.path.dirname(__file__), "portfolio.json")
+)
 
 
 class Portfolio:
