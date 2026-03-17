@@ -37,13 +37,13 @@ _client = None          # GrowwAPI instance
 _session_expiry = 0.0   # Unix timestamp when the session token expires
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
-# Groww API enforces ~100 requests/minute. We enforce a minimum gap of 0.65s
-# (~92 req/min) to stay safely under the limit. The lock makes this thread-safe
-# so concurrent scans (scheduler + manual API) don't race and double-fire.
-_RATE_LIMIT_DELAY = 0.65   # seconds between API calls (~92 req/min)
+# Groww API enforces ~100 requests/minute. We enforce a minimum gap of 0.75s
+# (~80 req/min) to stay comfortably under the limit. The lock makes this
+# thread-safe so concurrent callers (scheduler + UI) don't race.
+_RATE_LIMIT_DELAY = 0.75   # seconds between API calls (~80 req/min)
 _last_api_call_ts = 0.0
 _rate_limit_lock = threading.Lock()
-_RATE_LIMIT_BACKOFF = 5.0  # seconds to pause after receiving a rate-limit error
+_RATE_LIMIT_BACKOFF = 30.0  # seconds to freeze the pipeline after a 429 response
 
 
 def _rate_limit():
@@ -54,6 +54,21 @@ def _rate_limit():
         if elapsed < _RATE_LIMIT_DELAY:
             time.sleep(_RATE_LIMIT_DELAY - elapsed)
         _last_api_call_ts = time.time()
+
+
+def _apply_backoff():
+    """After a 429 response, freeze the global rate limiter for BACKOFF seconds.
+
+    This prevents the cascade where every subsequent symbol in the scan
+    immediately hits the rate limit too. All callers share this delay since
+    _last_api_call_ts is module-level.
+    """
+    global _last_api_call_ts
+    with _rate_limit_lock:
+        # Push next-allowed-call time forward. _rate_limit() will then sleep
+        # (DELAY - elapsed) where elapsed is negative → sleeps for ~BACKOFF.
+        _last_api_call_ts = time.time() + _RATE_LIMIT_BACKOFF
+    logger.warning(f"Rate limit hit — pausing all API calls for {_RATE_LIMIT_BACKOFF}s")
 
 
 def _jwt_expiry(token: str) -> float:
@@ -145,6 +160,8 @@ def fetch_ltp(symbol: str) -> float | None:
     except RuntimeError:
         raise
     except Exception as e:
+        if "rate limit" in str(e).lower():
+            _apply_backoff()
         logger.warning(f"Groww LTP error for {symbol}: {e}")
         return None
 
@@ -168,6 +185,8 @@ def fetch_quote(symbol: str) -> dict | None:
     except RuntimeError:
         raise
     except Exception as e:
+        if "rate limit" in str(e).lower():
+            _apply_backoff()
         logger.warning(f"Groww quote error for {symbol}: {e}")
         return None
 
@@ -214,9 +233,7 @@ def fetch_historical_candles(
                 err_str = str(e)
                 if "rate limit" in err_str.lower() or "Rate limit" in err_str:
                     logger.warning(f"Groww historical error ({symbol}): {e}")
-                    if attempt < 2:
-                        logger.info(f"Rate limit hit — backing off {_RATE_LIMIT_BACKOFF}s before retry {attempt + 1}/2")
-                        time.sleep(_RATE_LIMIT_BACKOFF)
+                    _apply_backoff()   # freeze the global pipeline, then retry
                     continue
                 logger.warning(f"Groww historical error ({symbol}): {e}")
                 return None
