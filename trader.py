@@ -93,6 +93,10 @@ def _emit(event: str, data: dict):
         _socketio.emit(event, data)
 
 
+# LTP cache from the previous scan — used to detect movers without candle data
+_prev_ltp: dict[str, float] = {}
+
+
 TRADES_CSV = os.path.join(os.path.dirname(__file__), "logs", "trades.csv")
 CSV_HEADERS = [
     "timestamp", "action", "symbol", "qty", "price", "cost_or_revenue",
@@ -388,10 +392,49 @@ def _scan_and_trade_impl(portfolio: Portfolio):
     # ══════════════════════════════════════════════════════════════════════
     ai_candidates = []
 
-    for symbol in config.STOCK_SYMBOLS:
-        if symbol in portfolio.positions:
-            continue  # already holding
+    # ── Batch LTP pre-screen ──────────────────────────────────────────────────
+    # Groww's get_ltp() accepts 50 symbols per call, so 223 symbols = 5 API
+    # calls instead of 223.  We use this to filter out stocks that haven't
+    # moved meaningfully since the last scan, then only fetch full candle
+    # history (one call each) for the filtered shortlist.
+    # Always include: held positions, commodity ETFs, NIFTY proxy.
+    # For equities: only fetch candles if price moved ≥ LTP_MOVE_THRESHOLD %
+    # since last scan OR we have no previous price (first scan of session).
+    LTP_MOVE_THRESHOLD = 0.003   # 0.3% move since last scan → fetch candles
 
+    scan_symbols = [s for s in config.STOCK_SYMBOLS if s not in portfolio.positions]
+    always_scan  = COMMODITY_ETFS | {NIFTY_PROXY}
+
+    try:
+        import groww_live
+        batch_ltp = groww_live.fetch_batch_ltp(scan_symbols)
+    except Exception as e:
+        logger.warning(f"Batch LTP pre-screen failed, scanning all symbols: {e}")
+        batch_ltp = {}
+
+    # Determine which symbols to fetch full candles for
+    if batch_ltp:
+        to_fetch = []
+        for sym in scan_symbols:
+            if sym in always_scan:
+                to_fetch.append(sym)
+                continue
+            ltp = batch_ltp.get(sym)
+            if ltp is None:
+                to_fetch.append(sym)   # unknown price → include to be safe
+                continue
+            prev = _prev_ltp.get(sym)
+            if prev is None or abs(ltp - prev) / prev >= LTP_MOVE_THRESHOLD:
+                to_fetch.append(sym)
+        # Update cache for next scan
+        _prev_ltp.update(batch_ltp)
+        logger.info(f"Batch LTP: {len(batch_ltp)}/{len(scan_symbols)} fetched, "
+                    f"{len(to_fetch)} symbols selected for candle fetch "
+                    f"(skipped {len(scan_symbols)-len(to_fetch)} unchanged)")
+    else:
+        to_fetch = scan_symbols   # fallback: scan everything
+
+    for symbol in to_fetch:
         scan_count += 1
         df = data_fetcher.fetch_data(symbol)
         if df is None:

@@ -71,16 +71,32 @@ def _apply_backoff():
     logger.warning(f"Rate limit hit — pausing all API calls for {_RATE_LIMIT_BACKOFF}s")
 
 
+def _next_6am_ist() -> float:
+    """Return Unix timestamp of the next 6:00 AM IST (when Groww tokens expire)."""
+    now = datetime.now(IST)
+    candidate = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if now >= candidate:
+        candidate = candidate + timedelta(days=1)
+    return candidate.timestamp()
+
+
 def _jwt_expiry(token: str) -> float:
-    """Extract expiry (Unix timestamp) from a JWT payload without a library."""
+    """Extract expiry (Unix timestamp) from a JWT payload without a library.
+
+    Groww tokens carry a JWT exp field set years in the future, but the docs
+    state the token is invalidated at 6:00 AM IST every day.  We take the
+    minimum of the two so we always re-auth before the server rejects us.
+    """
     try:
         payload_b64 = token.split(".")[1]
-        # Add padding
         payload_b64 += "=" * (-len(payload_b64) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-        return float(payload.get("exp", 0))
+        jwt_exp = float(payload.get("exp", 0))
     except Exception:
-        return 0.0
+        jwt_exp = 0.0
+    next_6am = _next_6am_ist()
+    # Use whichever is sooner; fall back to next 6 AM if JWT is missing/zero
+    return min(jwt_exp, next_6am) if jwt_exp > 0 else next_6am
 
 
 def _get_client():
@@ -105,12 +121,10 @@ def _get_client():
         from growwapi import GrowwAPI
 
         if secret:
-            # Exchange long-lived key + secret for a ~12h session token
             session_token = GrowwAPI.get_access_token(api_key=api_key, secret=secret)
             _session_expiry = _jwt_expiry(session_token)
-            logger.debug(f"Groww session token refreshed, expires {datetime.fromtimestamp(_session_expiry)}")
+            logger.debug(f"Groww session token refreshed, expires at {datetime.fromtimestamp(_session_expiry, tz=IST).strftime('%Y-%m-%d %H:%M IST')}")
         else:
-            # Use token directly (may already be a session token)
             session_token = api_key
             _session_expiry = _jwt_expiry(session_token)
 
@@ -197,6 +211,62 @@ def fetch_quote(symbol: str) -> dict | None:
             _apply_backoff()
         logger.warning(f"Groww quote error for {symbol}: {e}")
         return None
+
+
+_BATCH_SIZE = 50   # Groww Live Data API: max 50 instruments per call
+
+
+def fetch_batch_ltp(symbols: list[str]) -> dict[str, float]:
+    """Batch-fetch LTP for up to N symbols using a single API call per 50 instruments.
+
+    Groww's get_ltp() accepts a tuple of "NSE_<SYMBOL>" strings (max 50 per call).
+    Returns {symbol: ltp} for every symbol that returned a valid price.
+    Failed symbols are silently skipped (caller should handle missing keys).
+    """
+    if not symbols:
+        return {}
+
+    result: dict[str, float] = {}
+    try:
+        g = _get_client()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.warning(f"fetch_batch_ltp: client init failed: {e}")
+        return result
+
+    for i in range(0, len(symbols), _BATCH_SIZE):
+        chunk = symbols[i : i + _BATCH_SIZE]
+        exchange_symbols = tuple(f"NSE_{s}" for s in chunk)
+        for attempt in range(3):
+            try:
+                _rate_limit()
+                data = g.get_ltp(
+                    exchange_trading_symbols=exchange_symbols,
+                    segment=g.SEGMENT_CASH,
+                )
+                # Response: {"NSE_RELIANCE": {"ltp": 1234.5}, ...} or similar
+                for key, val in (data or {}).items():
+                    sym = key.replace("NSE_", "", 1)
+                    ltp = None
+                    if isinstance(val, dict):
+                        ltp = val.get("ltp") or val.get("last_price")
+                    elif isinstance(val, (int, float)):
+                        ltp = val
+                    if ltp is not None:
+                        result[sym] = float(ltp)
+                break
+            except Exception as e:
+                err_str = str(e)
+                if "rate limit" in err_str.lower():
+                    _apply_backoff()
+                    if attempt < 2:
+                        continue
+                logger.warning(f"fetch_batch_ltp chunk {i//50+1} error: {e}")
+                break
+
+    logger.debug(f"fetch_batch_ltp: {len(result)}/{len(symbols)} symbols fetched")
+    return result
 
 
 def fetch_historical_candles(
