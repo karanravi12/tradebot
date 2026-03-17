@@ -112,10 +112,12 @@ def zerodha_status():
     """Check if Kite is authenticated."""
     try:
         import kite_live
-        active = kite_live.is_available()
+        active   = kite_live.is_available()
+        domain   = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        base_url = f"https://{domain}" if domain else "http://localhost:5001"
         return jsonify({
             "authenticated": active,
-            "login_url": "http://localhost:5001/zerodha/login" if not active else None,
+            "login_url": f"{base_url}/zerodha/login" if not active else None,
         })
     except Exception as e:
         return jsonify({"authenticated": False, "error": str(e)})

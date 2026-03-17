@@ -91,7 +91,9 @@ def set_access_token(request_token: str) -> str:
 
 
 def _write_env_token(token: str):
-    """Update KITE_ACCESS_TOKEN in .env file."""
+    """Update KITE_ACCESS_TOKEN in .env file (local dev only — no-op on Railway)."""
+    if os.environ.get("RAILWAY_ENVIRONMENT"):
+        return  # Railway env vars are set in dashboard, not writable at runtime
     env_path = os.path.join(os.path.dirname(__file__), ".env")
     try:
         with open(env_path) as f:
